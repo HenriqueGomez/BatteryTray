@@ -1,6 +1,8 @@
-# Publica uma nova versão do BatteryTray.
+﻿# Publica uma nova versão do BatteryTray.
 # Uso (no PowerShell, dentro desta pasta):  .\release.ps1 1.1.0
-# Atualiza Updater.Version no código, compila para conferir, faz o commit, cria a tag v1.1.0 e envia.
+# Antes: escreva as mudanças no CHANGELOG.md, na seção [Não publicado].
+# O script transforma essa seção em "[1.1.0] - data", atualiza Updater.Version no código,
+# compila para conferir, faz o commit, cria a tag v1.1.0 e envia.
 # O GitHub Actions gera o Release; o app instalado em outros PCs mostra "Atualizar para v1.1.0" no menu.
 param([Parameter(Mandatory = $true)][string]$Version)
 
@@ -9,6 +11,22 @@ Set-Location $PSScriptRoot
 
 if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "Use o formato 1.2.3" }
 if (git tag --list "v$Version") { throw "A tag v$Version já existe. Use um número maior." }
+
+# CHANGELOG.md: a seção [Não publicado] vira "[versão] - data" (são as notas que aparecem no Release)
+$clFile = Join-Path $PSScriptRoot 'CHANGELOG.md'
+$cl = [IO.File]::ReadAllText($clFile) -replace "`r`n", "`n"
+if ($cl -notmatch ('(?m)^## \[' + [Regex]::Escape($Version) + '\]'))
+{
+    $m = [Regex]::Match($cl, '(?ms)^## \[Não publicado\][^\n]*\n(.*?)(?=^## \[|\z)')
+    if (-not $m.Success) { throw "O CHANGELOG.md não tem a seção ## [Não publicado]" }
+    $pending = [Regex]::Replace($m.Groups[1].Value, '(?s)<!--.*?-->', '').Trim()
+    if (-not $pending) { throw "Antes de publicar, escreva o que mudou no CHANGELOG.md, na seção ## [Não publicado]." }
+    $date = Get-Date -Format 'yyyy-MM-dd'
+    $cl = $cl.Substring(0, $m.Index) + "## [Não publicado]`n`n## [$Version] - $date`n`n$pending`n`n" + $cl.Substring($m.Index + $m.Length)
+    [IO.File]::WriteAllText($clFile, $cl, (New-Object Text.UTF8Encoding $false))
+}
+# confere com a mesma lógica que o GitHub Actions usa para montar as notas
+& (Join-Path $PSScriptRoot 'tools\changelog-notes.ps1') $Version (Join-Path $env:TEMP 'BatteryTray-notes.md') | Out-Null
 
 $file = Join-Path $PSScriptRoot 'BatteryTray.cs'
 $exe = Join-Path $PSScriptRoot 'BatteryTray.exe'
@@ -27,11 +45,12 @@ try
     cmd /c "`"$PSScriptRoot\build.cmd`""
     if ($LASTEXITCODE -ne 0) { throw "A compilação falhou; nada foi enviado" }
 
-    git add -A
-    git commit -m "Versão $Version"
-    git tag "v$Version"
-    git push
-    git push origin "v$Version"
+    function Invoke-Git { & git.exe @args; if ($LASTEXITCODE -ne 0) { throw "Falhou: git $($args -join ' ')" } }
+    Invoke-Git add -A
+    Invoke-Git commit -m "Versão $Version"
+    Invoke-Git tag "v$Version"
+    Invoke-Git push
+    Invoke-Git push origin "v$Version"
     Write-Host "Enviado. Acompanhe em: https://github.com/HenriqueGomez/BatteryTray/actions"
 }
 finally

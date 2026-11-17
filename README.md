@@ -74,18 +74,20 @@ Para testar sem abrir a interface, rode `BatteryTray.exe --dump`. Ele grava as l
 
 ## Publicar uma versão (mantenedor)
 
-No PowerShell, dentro da pasta do projeto:
+1. Enquanto trabalha, anote o que mudou no [`CHANGELOG.md`](CHANGELOG.md), na seção **`## [Não publicado]`**, em linguagem de quem usa o app.
+2. No PowerShell, dentro da pasta do projeto:
 
-```powershell
-.\release.ps1 1.2.0
-```
+   ```powershell
+   .\release.ps1 1.2.0
+   ```
 
 O script:
-1. fecha o BatteryTray, se estiver aberto a partir desta pasta;
-2. atualiza `Updater.Version` no código e compila;
-3. faz o commit, cria a tag `v1.2.0`, envia e reabre o app.
+1. transforma a seção `[Não publicado]` em `[1.2.0] - data`. Se ela estiver vazia, ele recusa publicar;
+2. fecha o BatteryTray, se estiver aberto a partir desta pasta;
+3. atualiza `Updater.Version` no código e compila;
+4. faz o commit, cria a tag `v1.2.0`, envia e reabre o app.
 
-Depois, o GitHub Actions compila e publica o Release com o `BatteryTray.exe` e o `BatteryTray.exe.sha256`.
+Depois, o GitHub Actions compila e publica o Release com o `BatteryTray.exe` e o `BatteryTray.exe.sha256`. As notas do Release são a seção da versão no `CHANGELOG.md`.
 
 > Num *fork*, troque `HenriqueGomez/BatteryTray` em `Updater.Repo` (no `BatteryTray.cs`) e no `release.ps1` pelo seu repositório.
 
