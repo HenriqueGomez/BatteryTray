@@ -12,6 +12,15 @@ Como usar (mantenedor):
 
 ## [Não publicado]
 
+## [1.3.2] - 2026-11-17
+
+### Correções
+- O controle GameSir Cyclone 2 aparecia como "Xbox 360 Controller for Windows" no modo XInput. Ele também virava outro aparelho ao trocar de modo. Agora o nome é sempre "GameSir Cyclone 2", e o ícone que você fixou na barra continua fixado.
+- O headset MCHOSE às vezes ignorava o pedido de bateria e aparecia desligado. Agora o app pergunta até 3 vezes.
+
+### Melhorias
+- O mouse **Delux M900 Pro** (receptor "2.4G 8K HS Receiver") aparece com o nome dele.
+
 ## [1.3.1] - 2026-11-17
 
 ### Correções

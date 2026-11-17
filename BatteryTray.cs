@@ -732,6 +732,7 @@ namespace BatteryTray
     // O XInput não serve: ele informa esses controles como "com fio".
     class GameSirSource : IBatterySource
     {
+        static readonly HashSet<ushort> CyclonePids = new HashSet<ushort> { 0x0575, 0x100B, 0x1053, 0x101D }; // receptor, XInput, cabo
         readonly Dictionary<string, Reading> last = new Dictionary<string, Reading>();
 
         public List<Reading> Poll()
@@ -739,10 +740,13 @@ namespace BatteryTray
             var seen = new HashSet<string>();
             foreach (var info in Hid.Enumerate().Where(i => i.Vid == 0x3537 && i.UsagePage == 0xFFF0 && i.Usage == 0x0040))
             {
-                // o PID muda com o modo (0x100B no XInput, 0x0575 com o controle desligado): a chave usa o nome
-                string name = string.IsNullOrEmpty(info.Product) ? "GameSir" : info.Product.Replace('-', ' ').Trim();
-                string key = "gamesir:" + name.ToLowerInvariant();
-                if (seen.Contains(key)) continue;
+                // o PID e o nome mudam com o modo (0x0575 "GameSir-Cyclone 2" com o controle desligado,
+                // 0x100B "Xbox 360 Controller for Windows" no XInput): a chave é a da marca
+                string key = "gamesir:3537";
+                string name = CyclonePids.Contains(info.Pid) ? "GameSir Cyclone 2"
+                            : info.Product != null && info.Product.IndexOf("gamesir", StringComparison.OrdinalIgnoreCase) >= 0 ? info.Product.Replace('-', ' ').Trim()
+                            : "Controle GameSir";
+                if (seen.Contains(key)) continue; // já lido nesta rodada (por outra coleção)
                 // quadros 0x12 todos zerados chegam quando o receptor não está ligado a um controle no modo XInput
                 // (os analógicos parados valem 0x80): não trazem bateria
                 var frame = Hid.Exchange(info, new byte[] { 0x0F, 0xF2, 0x00 }, f => f.Length > 36 && f[0] == 0x12, 1500);
@@ -757,9 +761,8 @@ namespace BatteryTray
                     r.Online = true; r.Updated = DateTime.Now;
                     last[key] = r; seen.Add(key);
                 }
-                else if (last.ContainsKey(key)) { r.Online = false; seen.Add(key); } // controle desligado
             }
-            foreach (var r in last.Values) if (!seen.Contains(r.Key)) r.Online = false;
+            foreach (var r in last.Values) if (!seen.Contains(r.Key)) r.Online = false; // controle desligado ou fora do XInput
             return last.Values.ToList();
         }
     }
@@ -770,6 +773,8 @@ namespace BatteryTray
     // 03 <modelo> 40 <estado> <%>  ·  estado: 1 na bateria, 2 carregado (100%), 3 carregando (a % fica congelada).
     class BekenMouseSource : IBatterySource
     {
+        // modelos confirmados por usuários do BatteryTray (nome completo, com a marca)
+        static readonly Dictionary<byte, string> Confirmed = new Dictionary<byte, string> { { 0x50, "Delux M900 Pro" } };
         // código do modelo (byte 1) -> nome, da lista do projeto BatteryMonitor (devices/beken-1d57.json)
         static readonly Dictionary<byte, string> Models = new Dictionary<byte, string> {
             { 0x93, "IN10" }, { 0x42, "IN9" }, { 0x41, "IN6" }, { 0x92, "IN6 SE" }, { 0x90, "IN9 Ultra" }, { 0x99, "INX" },
@@ -796,7 +801,8 @@ namespace BatteryTray
                 Diagnostics.Raw("Receptor 1D57:" + info.Pid.ToString("X4") + " (000A/0000)", f, 5);
                 if (f == null) { r.Online = false; continue; } // nenhum quadro em 2,5 s: mouse dormindo ou desligado
                 string model;
-                if (Models.TryGetValue(f[1], out model)) r.Name = "Mouse " + model;
+                if (Confirmed.TryGetValue(f[1], out model)) r.Name = model;
+                else if (Models.TryGetValue(f[1], out model)) r.Name = "Mouse " + model;
                 int pct = TenSteps.Contains(f[1]) ? f[4] * 10 : f[4];
                 if (f[3] == 2) pct = 100;
                 if (pct >= 0 && pct <= 100 && !(f[3] == 3 && r.Percent >= 0)) r.Percent = pct; // carregando: mantém o último valor
@@ -825,8 +831,11 @@ namespace BatteryTray
             {
                 string key = "mchose:" + info.Pid.ToString("X4");
                 if (seen.Contains(key)) continue;
-                var f = Hid.Exchange(info, new byte[] { 0x55, 0x65, 0x01 }, x => x.Length >= 4 && x[0] == 0x55 && x[1] == 0x65, 1000);
-                Diagnostics.Raw("MCHOSE 3837:" + info.Pid.ToString("X4") + " (FF90/0001, pedido 55 65 01)", f, 8);
+                // às vezes o headset ignora o primeiro pedido: pergunta de novo (como o HaloBattery), até 3 vezes
+                byte[] f = null; int tries = 0;
+                while (f == null && tries++ < 3)
+                    f = Hid.Exchange(info, new byte[] { 0x55, 0x65, 0x01 }, x => x.Length >= 4 && x[0] == 0x55 && x[1] == 0x65, 700);
+                Diagnostics.Raw("MCHOSE 3837:" + info.Pid.ToString("X4") + " (FF90/0001, pedido 55 65 01, " + Math.Min(tries, 3) + " tentativa(s))", f, 8);
                 Reading r;
                 if (!last.TryGetValue(key, out r))
                     r = new Reading { Key = key, Kind = DeviceKind.Headset, Name = string.IsNullOrEmpty(info.Product) ? "MCHOSE" : info.Product.Trim() };
@@ -1336,6 +1345,10 @@ namespace BatteryTray
             using (var b = new Bitmap(16, 16, PixelFormat.Format32bppArgb)) Blank = b.GetHicon();
         }
 
+        // chave nova -> chaves usadas por versões anteriores
+        static readonly Dictionary<string, string[]> FormerKeys = new Dictionary<string, string[]> {
+            { "gamesir:3537", new[] { "gamesir:xbox 360 controller for windows", "gamesir:gamesir cyclone 2" } } }; // até a v1.3.1
+
         // Cada aparelho tem um uID fixo (salvo no registro), para o Windows lembrar que ele está fixado.
         int UidFor(string key)
         {
@@ -1343,6 +1356,21 @@ namespace BatteryTray
             {
                 object v = k.GetValue(key);
                 if (v is int) return (int)v;
+                // aparelho que mudou de chave numa versão nova: herda o uID antigo (de preferência o fixado na barra),
+                // para o usuário não precisar fixar o ícone de novo
+                string[] former;
+                if (FormerKeys.TryGetValue(key, out former))
+                {
+                    var olds = former.Select(o => k.GetValue(o)).OfType<int>().ToList();
+                    if (olds.Count > 0)
+                    {
+                        var pinned = PinnedUids();
+                        int keep = olds.FirstOrDefault(pinned.Contains);
+                        if (keep == 0) keep = olds[0];
+                        k.SetValue(key, keep, RegistryValueKind.DWord); // as chaves antigas ficam, para o uID não ser reaproveitado
+                        return keep;
+                    }
+                }
                 var used = new HashSet<int>(k.GetValueNames().Select(n => k.GetValue(n)).OfType<int>());
                 int uid = FirstUid;
                 while (used.Contains(uid)) uid++;
@@ -1749,7 +1777,7 @@ namespace BatteryTray
     static class Updater
     {
         // Ao publicar uma versão nova, mude este número e crie a tag "v" + número (veja release.ps1).
-        public const string Version = "1.3.1";
+        public const string Version = "1.3.2";
         const string Repo = "HenriqueGomez/BatteryTray";
         const string Agent = "BatteryTray-Updater";
 
