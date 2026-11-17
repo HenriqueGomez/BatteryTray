@@ -12,6 +12,16 @@ Como usar (mantenedor):
 
 ## [Não publicado]
 
+## [1.3.1] - 2026-11-17
+
+### Correções
+- O controle GameSir aparecia com **0%** quando o receptor estava ligado mas o controle não estava no modo XInput. Agora ele aparece apagado, com o último valor conhecido.
+
+### Melhorias
+- Os mouses com receptor "2.4G 8K HS Receiver" aparecem com o nome do modelo (são mais de 40 modelos conhecidos).
+- O diagnóstico mostra o tamanho dos relatórios de saída de cada aparelho. Também diz por que um aparelho não respondeu: o envio falhou, não veio resposta ou chegou outro tipo de resposta.
+- A seção "O que o BatteryTray mostra agora" do diagnóstico ficava vazia quando ele era gerado logo depois de abrir o app.
+
 ## [1.3.0] - 2026-11-17
 
 ### Novidades

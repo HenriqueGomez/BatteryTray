@@ -86,12 +86,18 @@ namespace BatteryTray
 
         // Envia um relatório de saída e espera, por até timeoutMs, um relatório de entrada aceito por "accept".
         // (Para aparelhos que só conversam por relatórios de entrada/saída, sem "feature reports".)
+        // Para o diagnóstico: o último quadro aceito pela última chamada de Exchange nesta thread, ou o motivo da falha.
+        [ThreadStatic] public static byte[] LastFrame;
+        [ThreadStatic] public static string LastError;
+
         public static byte[] Exchange(Info info, byte[] request, Func<byte[], bool> accept, int timeoutMs)
         {
+            LastFrame = null; LastError = null;
             var h = CreateFile(info.Path, 0xC0000000, 3, IntPtr.Zero, 3, 0x40000000, IntPtr.Zero); // leitura/escrita, overlapped
             bool readOnly = false;
             if (h.IsInvalid && request == null) { h.Dispose(); h = CreateFile(info.Path, 0x80000000, 3, IntPtr.Zero, 3, 0x40000000, IntPtr.Zero); readOnly = true; }
-            if (h.IsInvalid) { h.Dispose(); return null; }
+            if (h.IsInvalid) { LastError = "não abriu (erro " + Marshal.GetLastWin32Error() + ")"; h.Dispose(); return null; }
+            int others = 0; string firstOther = null;
             using (var fs = new FileStream(h, readOnly ? FileAccess.Read : FileAccess.ReadWrite, 1, true))
             {
                 if (request != null) // null: só escuta (aparelhos que enviam a bateria sozinhos)
@@ -99,21 +105,33 @@ namespace BatteryTray
                     int outLen = info.OutLen > 0 ? info.OutLen : request.Length;
                     var req = new byte[outLen];
                     Array.Copy(request, req, Math.Min(request.Length, outLen));
-                    try { fs.Write(req, 0, outLen); fs.Flush(); } catch (IOException) { return null; }
+                    try { fs.Write(req, 0, outLen); fs.Flush(); }
+                    catch (IOException ex) { LastError = "o envio falhou (relatório de saída: " + info.OutLen + " B; " + ex.Message.Trim() + ")"; return null; }
                 }
                 var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
                 int inLen = Math.Max(1, (int)info.InLen);
                 while (true)
                 {
                     int left = (int)(deadline - DateTime.UtcNow).TotalMilliseconds;
-                    if (left <= 0) return null;
-                    var buf = new byte[inLen];
-                    IAsyncResult ar;
-                    try { ar = fs.BeginRead(buf, 0, inLen, null, null); } catch (IOException) { return null; }
-                    if (!ar.AsyncWaitHandle.WaitOne(left)) return null; // fechar o arquivo cancela a leitura pendente
-                    int n;
-                    try { n = fs.EndRead(ar); } catch (IOException) { return null; }
-                    if (n > 0 && accept(buf)) return buf;
+                    if (left > 0)
+                    {
+                        var buf = new byte[inLen];
+                        IAsyncResult ar;
+                        try { ar = fs.BeginRead(buf, 0, inLen, null, null); }
+                        catch (IOException ex) { LastError = "a leitura falhou (" + ex.Message.Trim() + ")"; return null; }
+                        if (ar.AsyncWaitHandle.WaitOne(left)) // fechar o arquivo cancela a leitura pendente
+                        {
+                            int n;
+                            try { n = fs.EndRead(ar); }
+                            catch (IOException ex) { LastError = "a leitura falhou (" + ex.Message.Trim() + ")"; return null; }
+                            if (n > 0 && accept(buf)) { LastFrame = buf; return buf; }
+                            if (n > 0 && others++ == 0) firstOther = BitConverter.ToString(buf, 0, Math.Min(n, 16)).Replace('-', ' ');
+                            continue;
+                        }
+                    }
+                    LastError = "sem resposta em " + timeoutMs + " ms" + (request != null ? " (relatório de saída: " + info.OutLen + " B)" : "")
+                              + (others > 0 ? "; chegaram " + others + " quadro(s) de outro tipo, o primeiro: " + firstOther : "");
+                    return null;
                 }
             }
         }
@@ -725,8 +743,11 @@ namespace BatteryTray
                 string name = string.IsNullOrEmpty(info.Product) ? "GameSir" : info.Product.Replace('-', ' ').Trim();
                 string key = "gamesir:" + name.ToLowerInvariant();
                 if (seen.Contains(key)) continue;
+                // quadros 0x12 todos zerados chegam quando o receptor não está ligado a um controle no modo XInput
+                // (os analógicos parados valem 0x80): não trazem bateria
                 var frame = Hid.Exchange(info, new byte[] { 0x0F, 0xF2, 0x00 }, f => f.Length > 36 && f[0] == 0x12, 1500);
-                Diagnostics.Raw("GameSir 3537:" + info.Pid.ToString("X4") + " (FFF0/0040, heartbeat 0F F2; bytes 0-39)", frame, 40);
+                if (frame != null && frame.Skip(1).Take(35).All(b => b == 0)) frame = null;
+                Diagnostics.Raw("GameSir 3537:" + info.Pid.ToString("X4") + " (FFF0/0040, heartbeat 0F F2; bytes 0-39)", Hid.LastFrame, 40);
                 Reading r;
                 if (!last.TryGetValue(key, out r)) r = new Reading { Key = key, Kind = DeviceKind.Controller };
                 r.Name = name;
@@ -749,8 +770,15 @@ namespace BatteryTray
     // 03 <modelo> 40 <estado> <%>  ·  estado: 1 na bateria, 2 carregado (100%), 3 carregando (a % fica congelada).
     class BekenMouseSource : IBatterySource
     {
+        // código do modelo (byte 1) -> nome, da lista do projeto BatteryMonitor (devices/beken-1d57.json)
         static readonly Dictionary<byte, string> Models = new Dictionary<byte, string> {
-            { 0x93, "INPHIC IN10" }, { 0x30, "Delux M900 Pro" }, { 0x55, "Attack Shark X11" }, { 0x85, "Attack Shark X6" }, { 0x10, "Attack Shark R1" } };
+            { 0x93, "IN10" }, { 0x42, "IN9" }, { 0x41, "IN6" }, { 0x92, "IN6 SE" }, { 0x90, "IN9 Ultra" }, { 0x99, "INX" },
+            { 0x55, "X11" }, { 0x07, "X11 SE" }, { 0xBE, "X11 Pro" }, { 0xA9, "X11 Pro V2" }, { 0x4D, "X3" }, { 0x4F, "X3 Pro" }, { 0x4E, "X3 Max" },
+            { 0x85, "X6" }, { 0x10, "R1" }, { 0xB1, "X1" }, { 0x06, "X8 Plus" }, { 0x08, "X8 Pro" }, { 0x02, "X8 SE" },
+            { 0x04, "G3" }, { 0x0E, "G3 Pro" }, { 0x05, "F3" }, { 0x0D, "F7" }, { 0x0C, "F7 Pro" }, { 0x49, "F1" },
+            { 0x24, "V6" }, { 0xE5, "V3 Pro" }, { 0xEA, "V3" }, { 0x65, "V2 MC" }, { 0x62, "V2 Ultra" }, { 0xCC, "V2 Ultra 3955" }, { 0x9E, "V2 MAX" }, { 0xCB, "V2" },
+            { 0x2C, "M2" }, { 0xBC, "M3" }, { 0x14, "MV6" }, { 0x87, "M740" }, { 0x30, "M90 Pro" }, { 0x3D, "M900 Mini" }, { 0x2B, "M800 Mini" },
+            { 0x43, "G15" }, { 0x77, "G11" }, { 0xC9, "G9 Pro" }, { 0x6C, "G25" }, { 0x61, "G64" }, { 0x9A, "MC031" }, { 0x6D, "DVSE4" }, { 0xC3, "Vanguard" } };
         static readonly HashSet<byte> TenSteps = new HashSet<byte> { 0x85, 0x10 }; // informam 0-10
         readonly Dictionary<string, Reading> last = new Dictionary<string, Reading>();
 
@@ -768,7 +796,7 @@ namespace BatteryTray
                 Diagnostics.Raw("Receptor 1D57:" + info.Pid.ToString("X4") + " (000A/0000)", f, 5);
                 if (f == null) { r.Online = false; continue; } // nenhum quadro em 2,5 s: mouse dormindo ou desligado
                 string model;
-                if (Models.TryGetValue(f[1], out model)) r.Name = model;
+                if (Models.TryGetValue(f[1], out model)) r.Name = "Mouse " + model;
                 int pct = TenSteps.Contains(f[1]) ? f[4] * 10 : f[4];
                 if (f[3] == 2) pct = 100;
                 if (pct >= 0 && pct <= 100 && !(f[3] == 3 && r.Percent >= 0)) r.Percent = pct; // carregando: mantém o último valor
@@ -1721,7 +1749,7 @@ namespace BatteryTray
     static class Updater
     {
         // Ao publicar uma versão nova, mude este número e crie a tag "v" + número (veja release.ps1).
-        public const string Version = "1.3.0";
+        public const string Version = "1.3.1";
         const string Repo = "HenriqueGomez/BatteryTray";
         const string Agent = "BatteryTray-Updater";
 
@@ -1831,7 +1859,7 @@ namespace BatteryTray
             lock (sb)
             {
                 sb.Append(label).Append(": ");
-                if (frame == null) sb.AppendLine("sem resposta");
+                if (frame == null) sb.AppendLine(Hid.LastError ?? "sem resposta");
                 else { for (int i = 0; i < Math.Min(count, frame.Length); i++) sb.AppendFormat("{0:X2} ", frame[i]); sb.AppendLine(); }
             }
         }
@@ -1991,9 +2019,9 @@ namespace BatteryTray
                     {
                         var mi = Regex.Match(c.Path, "&mi_([0-9a-f]{2})", RegexOptions.IgnoreCase);
                         var col = Regex.Match(c.Path, "&col([0-9a-f]{2})", RegexOptions.IgnoreCase);
-                        sb.AppendFormat("   coleção {0:X4}/{1:X4} {2,-30} entrada {3,3} B · feature {4,3} B{5}{6}{7}", c.UsagePage, c.Usage, Usage(c), c.InLen, c.FeatLen,
+                        sb.AppendFormat("   coleção {0:X4}/{1:X4} {2,-30} entrada {3,3} B · saída {8,3} B · feature {4,3} B{5}{6}{7}", c.UsagePage, c.Usage, Usage(c), c.InLen, c.FeatLen,
                             mi.Success ? " · interface " + mi.Groups[1].Value : "", col.Success ? " · col " + col.Groups[1].Value : "",
-                            c.Vid == 0x1532 && c.FeatLen == 91 ? " · relatório Razer" : "").AppendLine();
+                            c.Vid == 0x1532 && c.FeatLen == 91 ? " · relatório Razer" : "", c.OutLen).AppendLine();
                         if (c.Vid != 0x046D && c.Vid != 0x1532 && pct < 0)
                         {
                             bool f; int v = -1;
@@ -2139,12 +2167,15 @@ namespace BatteryTray
         void RunDiagnostics()
         {
             if (Interlocked.CompareExchange(ref diagRunning, 1, 0) != 0) return;
-            var shown = Ordered().Select(r => (IsVisible(r.Key) ? "[visível] " : "[oculto]  ") + Diagnostics.Describe(r)).ToList();
             SetDiagStatus("Gerando diagnóstico...");
             ThreadPool.QueueUserWorkItem(_ =>
             {
                 // espera a leitura periódica terminar, para as duas não conversarem com os aparelhos ao mesmo tempo
                 while (Interlocked.CompareExchange(ref busy, 1, 0) != 0) Thread.Sleep(100);
+                // o que o app mostra, já com o resultado dessa leitura (logo depois de abrir, a primeira ainda pode estar em andamento)
+                List<string> shown = null;
+                try { ui.Send(__ => shown = Ordered().Select(r => (IsVisible(r.Key) ? "[visível] " : "[oculto]  ") + Diagnostics.Describe(r)).ToList(), null); }
+                catch { }
                 string path = null;
                 try { path = Diagnostics.Write(shown); }
                 catch (Exception ex) { try { File.WriteAllText(Path.Combine(Path.GetTempPath(), "BatteryTray-diagnostico-erro.txt"), ex.ToString()); } catch { } }
