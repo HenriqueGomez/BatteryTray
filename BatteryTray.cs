@@ -1,8 +1,14 @@
-// BatteryTray - mostra a % de bateria dos dispositivos sem fio na bandeja do Windows.
-//  - Logitech (LIGHTSPEED/Unifying/Bolt ou cabo) via HID++ 2.0 (features 0x1004 / 0x1000)
-//  - Razer (headsets com Synapse 4) lendo os eventos "Battery Status" dos logs do Synapse
-//  - Controles XInput que informam bateria (ex.: Xbox)
-// Compilar com build.cmd (usa o csc do .NET Framework 4, que já vem no Windows).
+// BatteryTray - mostra a % de bateria dos dispositivos sem fio na barra de tarefas do Windows 11.
+// Cada aparelho é um ícone de bandeja fixado; o texto (ícone + %) é desenhado por cima, dentro da barra.
+// Fontes de leitura:
+//  - Logitech (LIGHTSPEED/Unifying/Bolt ou cabo): HID++ 2.0 (features 0x1004, 0x1000, 0x1001, 0x1F20)
+//  - Razer, headsets: eventos "Battery Status" dos logs do Razer Synapse 4
+//  - Razer, mouses/teclados sem fio: feature report de 90 bytes (protocolo do openrazer)
+//  - Bluetooth de qualquer marca: bateria guardada pelo Windows nas propriedades do dispositivo
+//  - USB/HID genérico: campo de bateria padrão (Battery Strength / Remaining Capacity)
+//  - Controles XInput que informam bateria
+// Atualização: consulta o último Release do GitHub (veja Updater e release.ps1).
+// Compilar com build.cmd (usa o csc do .NET Framework 4, que já vem no Windows). Licença MIT.
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
