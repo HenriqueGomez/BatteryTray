@@ -12,6 +12,23 @@ Como usar (mantenedor):
 
 ## [Não publicado]
 
+## [1.3.3] - 2026-11-17
+
+### Novidades
+- **Aviso de bateria baixa:** uma notificação do Windows quando um aparelho chega a 15% e outra em 5%. Depois de carregar, volta a avisar. Respeita o "Não incomodar" e pode ser desligado no menu, em **Avisar bateria baixa**.
+- Aparelhos desligados mostram quando foram lidos pela última vez, por exemplo "lido ontem às 22:00". Isso aparece na dica do ícone e no menu.
+
+### Melhorias
+- A busca por aparelhos Logitech ficou cerca de 8 vezes mais rápida: passou de ~10 s para ~1 s em receptores com um aparelho só. O app agora pula as posições vazias do receptor. Durante essa busca, as outras leituras e o "Atualizar agora" ficavam esperando.
+- A lista de aparelhos USB do PC passou a ser montada uma vez por rodada, e não mais uma vez para cada tipo de aparelho.
+- **Atualizar agora** não fecha mais o menu: ele mostra "Atualizando..." e as porcentagens mudam ali mesmo.
+- Mensagens do menu mais curtas, como "Já está atualizado".
+- O diagnóstico mostra, para cada aparelho, se o ícone está fixado e onde o Windows diz que ele está na barra.
+
+### Correções
+- Mouses e teclados Logitech viravam um aparelho novo quando o receptor era ligado em outra porta USB. O ícone saía da barra e precisava ser fixado de novo. Agora o aparelho continua o mesmo, e quem atualizar mantém os ícones fixados e os aparelhos ocultos.
+- Às vezes os ícones fixados na barra viravam só o número, sem o desenho do aparelho e sem o "%". Isso acontecia quando o Windows deixava de informar a posição deles por um momento, por exemplo com a tela bloqueada, ao voltar da suspensão ou com um jogo em tela cheia.
+
 ## [1.3.2] - 2026-11-17
 
 ### Correções

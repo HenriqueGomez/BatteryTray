@@ -10,8 +10,8 @@ Como cada aparelho aparece na barra (prévia ampliada):
 
 - **Normal:** a porcentagem, por exemplo `80%`.
 - **Carregando:** o `%` vira um raio, por exemplo `45⚡`.
-- **Desligado ou fora de alcance:** o ícone fica apagado e mostra o último valor conhecido.
-- **Bateria baixa (15% ou menos):** o texto fica vermelho.
+- **Desligado ou fora de alcance:** o ícone fica apagado e mostra o último valor conhecido. Passando o mouse, aparece quando ele foi lido, por exemplo "lido ontem às 22:00".
+- **Bateria baixa (15% ou menos):** o texto fica vermelho e, se o aviso estiver ligado, chega uma notificação.
 - **Detalhes:** passando o mouse, aparece o nome do aparelho e a porcentagem.
 
 ## Instalação
@@ -31,8 +31,9 @@ Como cada aparelho aparece na barra (prévia ampliada):
 O menu abre com o clique direito em qualquer aparelho, ou no ícone de bateria quando nenhum aparelho estiver visível:
 
 - **Dispositivos na barra:** escolha quais aparelhos aparecem. Os interruptores não fecham o menu.
-- **Atualizar agora:** relê as baterias. Isso também acontece sozinho a cada minuto.
+- **Atualizar agora:** relê as baterias sem fechar o menu. Isso também acontece sozinho a cada minuto.
 - **Iniciar com o Windows.**
+- **Avisar bateria baixa:** mostra uma notificação do Windows quando um aparelho chega a 15% e outra em 5%. Depois de carregar, volta a avisar. Respeita o "Não incomodar". Vem ligado.
 - **Verificar atualizações:** mostra a versão instalada e, quando existir uma nova, vira **Atualizar para vX.Y.Z**. A atualização baixa o novo `.exe`, confere o SHA-256 publicado no Release, troca o arquivo e reabre o app.
 - **Gerar diagnóstico:** cria o arquivo `BatteryTray-diagnostico-<data>.txt` na pasta do app e abre a pasta com ele selecionado. Leva alguns segundos. Veja [Um aparelho não aparece?](#um-aparelho-não-aparece)
 
@@ -55,7 +56,7 @@ O menu abre com o clique direito em qualquer aparelho, ou no ícone de bateria q
 - controles cujo receptor se apresenta ao Windows como "com fio" (por exemplo, o dongle da 8BitDo);
 - aparelhos Logitech que só informam a tensão: nesse caso a porcentagem é uma **estimativa**.
 
-Só foi testado com um Logitech G502 X PLUS e um Razer Kraken V3 Pro. O suporte a GameSir, MCHOSE e aos receptores 2.4G foi feito a partir dos protocolos documentados por outros projetos e ainda não foi confirmado num aparelho. Outros aparelhos usam os mesmos protocolos, mas podem se comportar diferente.
+**Testado com:** Logitech G502 X PLUS, Razer Kraken V3 Pro, GameSir Cyclone 2, Delux M900 Pro (receptor 2.4G) e MCHOSE V9 Turbo+. Outros aparelhos usam os mesmos protocolos, mas podem se comportar diferente.
 
 ### Um aparelho não aparece?
 
@@ -73,7 +74,7 @@ Se o app nem abrir, rode `BatteryTray.exe --diagnostico` no terminal, na pasta d
 - **Aparelhos:** lê a bateria conversando direto com receptores Logitech e Razer (somente comandos de leitura) e com as propriedades de dispositivos do Windows.
 - **Arquivos:** lê os logs do Razer Synapse em `%LOCALAPPDATA%\Razer\RazerAppEngine\User Data\Logs`. Só grava o arquivo de diagnóstico quando você pede, e ele não é enviado a lugar nenhum.
 - **Registro do Windows, só no seu usuário:**
-  - `HKCU\Software\BatteryTray` guarda os aparelhos ocultos e a identificação de cada ícone;
+  - `HKCU\Software\BatteryTray` guarda os aparelhos ocultos, a identificação de cada ícone e se o aviso de bateria baixa está ligado;
   - `HKCU\...\CurrentVersion\Run` guarda o início com o Windows, se você ligar.
 
 ## Desinstalar

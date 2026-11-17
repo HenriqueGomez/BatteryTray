@@ -210,7 +210,26 @@ namespace BatteryTray
             return "outro";
         }
 
+        // A lista é montada uma vez a cada poucos segundos e compartilhada pelas fontes de uma mesma rodada:
+        // montar abre todos os aparelhos HID do PC, e um aparelho lento atrasaria cada fonte.
+        static readonly object enumLock = new object();
+        static List<Info> enumCache;
+        static DateTime enumAt;
+
         public static List<Info> Enumerate()
+        {
+            lock (enumLock)
+            {
+                if (enumCache == null || (DateTime.UtcNow - enumAt).TotalSeconds > 5)
+                {
+                    enumCache = EnumerateNow();
+                    enumAt = DateTime.UtcNow;
+                }
+                return new List<Info>(enumCache);
+            }
+        }
+
+        static List<Info> EnumerateNow()
         {
             var res = new List<Info>();
             Guid g; HidD_GetHidGuid(out g);
@@ -316,25 +335,38 @@ namespace BatteryTray
         public List<Reading> Poll()
         {
             // canal HID++ "longo": receptores/aparelhos comuns (FF00/0002) e aparelhos G mais novos, como headsets (FF43/0202)
-            var collections = Hid.Enumerate().Where(i => i.Vid == 0x046D &&
+            var all = Hid.Enumerate();
+            var collections = all.Where(i => i.Vid == 0x046D &&
                 ((i.UsagePage == 0xFF00 && i.Usage == 0x0002) || (i.UsagePage == 0xFF43 && i.Usage == 0x0202))).ToList();
             bool rescan = (DateTime.UtcNow - lastScan).TotalMinutes >= 5;
             var paths = new HashSet<string>(collections.Select(c => c.Path));
 
             foreach (var col in collections)
             {
+                var devs = new List<byte>();
+                bool anyKnown = known.Values.Any(k => k.Path == col.Path);
+                if (rescan || !anyKnown)
+                {
+                    var shortCol = ShortCollection(all, col);
+                    var slots = new byte[] { 1, 2, 3, 4, 5, 6 };
+                    var paired = slots.Where(d => !EmptySlot(shortCol, d)).ToList();
+                    devs.AddRange(paired);
+                    // 0xFF é o aparelho ligado direto (cabo, headset); num receptor (alguma posição vazia) é o próprio receptor
+                    if (paired.Count == slots.Length) devs.Add(0xFF);
+                }
+                else devs.AddRange(known.Values.Where(k => k.Path == col.Path).Select(k => k.Dev));
+
                 HppChannel ch;
                 try { ch = new HppChannel(col.Path); } catch { continue; }
                 using (ch)
                 {
-                    var devs = new List<byte>();
-                    bool anyKnown = known.Values.Any(k => k.Path == col.Path);
-                    if (rescan || !anyKnown) devs.AddRange(new byte[] { 1, 2, 3, 4, 5, 6, 0xFF });
-                    else devs.AddRange(known.Values.Where(k => k.Path == col.Path).Select(k => k.Dev));
 
                     foreach (byte dev in devs.Distinct())
                     {
-                        string key = "logi:" + col.Path + "#" + dev;
+                        // chave pelo modelo do receptor e o número do aparelho nele, sem o caminho USB (que muda ao trocar
+                        // de porta); só com dois receptores iguais ligados o caminho entra, para não misturar os dois
+                        bool twin = collections.Count(c => c.Pid == col.Pid) > 1;
+                        string key = twin ? "logi:" + col.Path + "#" + dev : "logi:" + col.Pid.ToString("X4") + "#" + dev;
                         Known k, old;
                         known.TryGetValue(key, out old);
                         k = old;
@@ -355,6 +387,31 @@ namespace BatteryTray
             if (rescan) lastScan = DateTime.UtcNow;
             foreach (var k in known.Values.Where(k => !paths.Contains(k.Path))) k.Last.Online = false;
             return known.Values.Select(k => k.Last).ToList();
+        }
+
+        // Canal HID++ "curto" (FF00/0001) do mesmo receptor: é por ele que o receptor responde os erros.
+        static Hid.Info ShortCollection(List<Hid.Info> all, Hid.Info longCol)
+        {
+            // \\?\hid#vid_046d&pid_c547&mi_02&col02#a&2ee94837&0&0001#{...}: tira o "&colNN" e o último número da instância
+            Func<string, string> baseOf = p =>
+            {
+                var parts = p.Split('#');
+                if (parts.Length < 3) return p;
+                return Regex.Replace(parts[1], "&col[0-9a-f]{2}", "", RegexOptions.IgnoreCase) + "#" + Regex.Replace(parts[2], "&[0-9a-f]+$", "", RegexOptions.IgnoreCase);
+            };
+            string b = baseOf(longCol.Path);
+            return all.FirstOrDefault(i => i.Vid == longCol.Vid && i.Pid == longCol.Pid && i.UsagePage == 0xFF00 && i.Usage == 0x0001
+                                           && string.Equals(baseOf(i.Path), b, StringComparison.OrdinalIgnoreCase));
+        }
+
+        // Posição vazia do receptor: um "ping" curto volta na hora com o erro 0x08 (aparelho desconhecido).
+        // Assim a varredura não espera 1,5 s em cada uma das 6 posições. Aparelho pareado mas dormindo não dá esse erro.
+        static bool EmptySlot(Hid.Info shortCol, byte dev)
+        {
+            if (shortCol == null) return false; // aparelho no cabo, sem canal curto: pergunta normalmente
+            var r = Hid.Exchange(shortCol, new byte[] { 0x10, dev, 0x00, 0x1A, 0x00, 0x00, 0x00 },
+                                 f => f.Length >= 6 && f[0] == 0x10 && f[1] == dev && f[2] == 0x8F, 150);
+            return r != null && r[5] == 0x08;
         }
 
         // -1 = aparelho não respondeu; 0 = não tem a feature; >0 = índice da feature
@@ -1185,8 +1242,19 @@ namespace BatteryTray
         public static string Describe(Reading r)
         {
             string pct = r.Percent < 0 ? "?" : (r.LevelText != null ? "~" + r.Percent + "% (" + r.LevelText + ")" : r.Percent + "%");
-            string status = !r.Online ? " — desligado (último valor)" : r.Charging ? " — carregando" : "";
+            string status = !r.Online ? " — desligado, " + (r.Updated > DateTime.MinValue ? "lido " + Ago(r.Updated) : "último valor") : r.Charging ? " — carregando" : "";
             return r.Name + ": " + pct + status;
+        }
+
+        // "há 5 min", "há 3 h", "ontem às 22:00", "em 12/11"
+        public static string Ago(DateTime t)
+        {
+            var d = DateTime.Now - t;
+            if (d.TotalMinutes < 2) return "agora há pouco";
+            if (d.TotalMinutes < 60) return "há " + (int)d.TotalMinutes + " min";
+            if (t.Date == DateTime.Today) return "há " + (int)d.TotalHours + " h";
+            if (t.Date == DateTime.Today.AddDays(-1)) return "ontem às " + t.ToString("HH:mm");
+            return "em " + t.ToString("dd/MM");
         }
     }
 
@@ -1345,9 +1413,16 @@ namespace BatteryTray
             using (var b = new Bitmap(16, 16, PixelFormat.Format32bppArgb)) Blank = b.GetHicon();
         }
 
-        // chave nova -> chaves usadas por versões anteriores
-        static readonly Dictionary<string, string[]> FormerKeys = new Dictionary<string, string[]> {
-            { "gamesir:3537", new[] { "gamesir:xbox 360 controller for windows", "gamesir:gamesir cyclone 2" } } }; // até a v1.3.1
+        // Chave de um aparelho no formato de uma versão anterior -> chave atual (a própria chave, se não mudou).
+        //  - Logitech até a v1.3.2: "logi:<caminho USB do receptor>#<n>" -> "logi:<PID do receptor>#<n>"
+        //  - GameSir até a v1.3.1: o nome do aparelho -> "gamesir:3537"
+        public static string CurrentKey(string key)
+        {
+            var m = Regex.Match(key, @"^logi:\\\\\?\\hid#vid_046d&pid_([0-9a-f]{4})[^#]*#.*#(\d+)$", RegexOptions.IgnoreCase);
+            if (m.Success) return "logi:" + m.Groups[1].Value.ToUpperInvariant() + "#" + m.Groups[2].Value;
+            if (key == "gamesir:xbox 360 controller for windows" || key == "gamesir:gamesir cyclone 2") return "gamesir:3537";
+            return key;
+        }
 
         // Cada aparelho tem um uID fixo (salvo no registro), para o Windows lembrar que ele está fixado.
         int UidFor(string key)
@@ -1358,10 +1433,8 @@ namespace BatteryTray
                 if (v is int) return (int)v;
                 // aparelho que mudou de chave numa versão nova: herda o uID antigo (de preferência o fixado na barra),
                 // para o usuário não precisar fixar o ícone de novo
-                string[] former;
-                if (FormerKeys.TryGetValue(key, out former))
                 {
-                    var olds = former.Select(o => k.GetValue(o)).OfType<int>().ToList();
+                    var olds = k.GetValueNames().Where(n => n != key && CurrentKey(n) == key).Select(o => k.GetValue(o)).OfType<int>().ToList();
                     if (olds.Count > 0)
                     {
                         var pinned = PinnedUids();
@@ -1407,6 +1480,19 @@ namespace BatteryTray
         }
 
         public bool Has(string key) { Entry e; return entries.TryGetValue(key, out e) && e.Added; }
+
+        // Notificação do Windows saindo do ícone do aparelho (respeita o "Não incomodar").
+        public void Notify(string key, string title, string text)
+        {
+            Entry e;
+            if (!entries.TryGetValue(key, out e) || !e.Added) return;
+            var d = Data(e);
+            d.uFlags |= 0x10; // NIF_INFO
+            d.szInfoTitle = title.Length > 63 ? title.Substring(0, 63) : title;
+            d.szInfo = text.Length > 255 ? text.Substring(0, 255) : text;
+            d.dwInfoFlags = 0x2 | 0x80; // NIIF_WARNING | NIIF_RESPECT_QUIET_TIME
+            Shell_NotifyIcon(NIM_MODIFY, ref d);
+        }
 
         // Ícones reaproveitados (ex.: o do app) não são destruídos ao trocar.
         public readonly HashSet<IntPtr> SharedIcons = new HashSet<IntPtr>();
@@ -1531,7 +1617,7 @@ namespace BatteryTray
         public readonly MenuTheme T = MenuTheme.Current();
         public readonly float S = Native.Scale();
         public const int MenuWidth = 236;
-        // O menu só fecha quando o próprio app manda (clique fora, Esc, "Atualizar agora", "Sair").
+        // O menu só fecha quando o próprio app manda (clique fora, Esc, "Sair").
         // Assim, clicar nos interruptores ou a bandeja trocar de ícones não o fecha.
         bool allowClose;
         bool wasDown = true;
@@ -1742,7 +1828,8 @@ namespace BatteryTray
             Glyph(g, SlotRenderer.Glyph(r.Kind), 16, on ? t.Text : t.Muted, 24 * s, cy);
             using (var f = M.UiFont(12.5f)) DrawLabel(g, r.Name, f, on ? t.Text : t.Muted, 44 * s, cy - 15 * s, Width - 100 * s);
             string pct = r.Percent < 0 ? "?" : (r.LevelText != null ? "~" : "") + r.Percent + "%";
-            string status = !r.Online ? "desligado" : r.Charging ? "carregando" : (r.LevelText != null ? "estimada" : null);
+            string status = !r.Online ? (r.Updated > DateTime.MinValue ? "desligado · " + SlotRenderer.Ago(r.Updated) : "desligado")
+                          : r.Charging ? "carregando" : (r.LevelText != null ? "estimada" : null);
             Color pc = r.Online && r.Percent >= 0 && r.Percent <= 15 && !r.Charging ? t.Low : t.Muted;
             using (var f = M.UiFont(11)) DrawLabel(g, status == null ? pct : pct + " · " + status, f, pc, 44 * s, cy + 1 * s, Width - 100 * s);
             Switch(g, t, s, on, Width - 12 * s, cy);
@@ -1777,7 +1864,7 @@ namespace BatteryTray
     static class Updater
     {
         // Ao publicar uma versão nova, mude este número e crie a tag "v" + número (veja release.ps1).
-        public const string Version = "1.3.2";
+        public const string Version = "1.3.3";
         const string Repo = "HenriqueGomez/BatteryTray";
         const string Agent = "BatteryTray-Updater";
 
@@ -2161,7 +2248,7 @@ namespace BatteryTray
                 {
                     Interlocked.Exchange(ref updating, 0);
                     if (err == null) available = r;
-                    SetUpdateStatus(!manual ? updateStatus : err != null ? "Não foi possível verificar" : r == null ? "Você já tem a versão mais recente" : null);
+                    SetUpdateStatus(!manual ? updateStatus : err != null ? "Falha ao verificar" : r == null ? "Já está atualizado" : null);
                 }, null);
             });
         }
@@ -2202,7 +2289,15 @@ namespace BatteryTray
                 while (Interlocked.CompareExchange(ref busy, 1, 0) != 0) Thread.Sleep(100);
                 // o que o app mostra, já com o resultado dessa leitura (logo depois de abrir, a primeira ainda pode estar em andamento)
                 List<string> shown = null;
-                try { ui.Send(__ => shown = Ordered().Select(r => (IsVisible(r.Key) ? "[visível] " : "[oculto]  ") + Diagnostics.Describe(r)).ToList(), null); }
+                try
+                {
+                    ui.Send(__ => shown = Ordered().Select(r =>
+                    {
+                        string li;
+                        return (IsVisible(r.Key) ? "[visível] " : "[oculto]  ") + Diagnostics.Describe(r)
+                             + (IsVisible(r.Key) && layoutInfo.TryGetValue(r.Key, out li) ? Environment.NewLine + "          barra: " + li : "");
+                    }).ToList(), null);
+                }
                 catch { }
                 string path = null;
                 try { path = Diagnostics.Write(shown); }
@@ -2211,7 +2306,7 @@ namespace BatteryTray
                 ui.Post(__ =>
                 {
                     Interlocked.Exchange(ref diagRunning, 0);
-                    if (path == null) { SetDiagStatus("Não foi possível gerar o diagnóstico"); return; }
+                    if (path == null) { SetDiagStatus("Falha no diagnóstico"); return; }
                     SetDiagStatus(null);
                     if (menu != null) menu.Dismiss();
                     try { System.Diagnostics.Process.Start("explorer.exe", "/select,\"" + path + "\""); } catch { }
@@ -2224,7 +2319,14 @@ namespace BatteryTray
         public OverlayApp()
         {
             ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
-            using (var k = Registry.CurrentUser.OpenSubKey(HiddenKey)) if (k != null) foreach (var n in k.GetValueNames()) hidden.Add(n);
+            using (var k = Registry.CurrentUser.OpenSubKey(HiddenKey, true))
+                if (k != null)
+                    foreach (var n in k.GetValueNames())
+                    {
+                        string cur = TrayIcons.CurrentKey(n); // aparelho oculto numa versão anterior, com a chave antiga
+                        if (cur != n) { k.SetValue(cur, 1, RegistryValueKind.DWord); k.DeleteValue(n, false); }
+                        hidden.Add(cur);
+                    }
             tray.LeftClick = RefreshNow;
             tray.RightClick = ShowMenu;
             tray.Recreated = () => { iconSig.Clear(); Layout(); };
@@ -2238,6 +2340,21 @@ namespace BatteryTray
         }
 
         public void RefreshNow() { ThreadPool.QueueUserWorkItem(_ => Tick()); }
+
+        // "Atualizar agora" no menu: o menu fica aberto, mostra "Atualizando..." e os valores mudam ali mesmo.
+        string refreshStatus;
+        void RefreshFromMenu()
+        {
+            if (refreshStatus != null) return;
+            refreshStatus = "Atualizando...";
+            if (menu != null && menu.Visible) menu.Invalidate(true);
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                while (Volatile.Read(ref busy) != 0) Thread.Sleep(100); // espera a leitura em andamento
+                Tick();
+                ui.Post(__ => { refreshStatus = null; if (menu != null && menu.Visible) menu.Invalidate(true); }, null); // depois do Apply
+            });
+        }
 
         void Tick()
         {
@@ -2264,6 +2381,37 @@ namespace BatteryTray
             }
             if (menu != null && menu.Visible) menu.Invalidate(true); // atualiza os valores com o menu aberto
             Layout();
+            WarnLowBattery();
+        }
+
+        // Aviso de bateria baixa: uma notificação ao chegar em 15% e outra em 5%. Volta a avisar depois de carregar.
+        const string AlertsValue = "AvisoBateriaBaixa";
+        readonly Dictionary<string, int> warnedAt = new Dictionary<string, int>();
+
+        static bool AlertsOn()
+        {
+            using (var k = Registry.CurrentUser.OpenSubKey(@"Software\BatteryTray")) { var v = k == null ? null : k.GetValue(AlertsValue); return !(v is int) || (int)v != 0; }
+        }
+
+        static void SetAlerts(bool on)
+        {
+            using (var k = Registry.CurrentUser.CreateSubKey(@"Software\BatteryTray")) k.SetValue(AlertsValue, on ? 1 : 0, RegistryValueKind.DWord);
+        }
+
+        void WarnLowBattery()
+        {
+            bool on = AlertsOn();
+            foreach (var r in state.Values)
+            {
+                if (r.Charging || r.Percent > 25) { warnedAt.Remove(r.Key); continue; } // carregou: pode avisar de novo
+                if (!on || !r.Online || r.Percent < 0 || !IsVisible(r.Key)) continue;
+                int level = r.Percent <= 5 ? 5 : r.Percent <= 15 ? 15 : 0;
+                int done;
+                if (level == 0 || (warnedAt.TryGetValue(r.Key, out done) && done <= level)) continue;
+                warnedAt[r.Key] = level;
+                tray.Notify(r.Key, "Bateria baixa: " + r.Name,
+                    (r.LevelText != null ? "Cerca de " : "") + r.Percent + "% restantes. " + (level == 5 ? "Coloque para carregar agora." : "Coloque para carregar em breve."));
+            }
         }
 
         bool IsVisible(string key) { return !hidden.Contains(key); }
@@ -2293,6 +2441,8 @@ namespace BatteryTray
             tray.Set(AppIconKey, appIcon, tip + "\nClique com o botão direito para abrir o menu");
         }
 
+        readonly Dictionary<string, string> layoutInfo = new Dictionary<string, string>(); // para o diagnóstico
+
         void Layout()
         {
             UpdateAppIcon();
@@ -2314,9 +2464,17 @@ namespace BatteryTray
 
                 int uid = tray.Has(r.Key) ? tray.UidOf(r.Key) : EnsureIcon(r, false);
                 Rectangle? rect = tray.Rect(uid);
-                bool onBar = pinned.Contains(uid) && rect.HasValue && !tb.IsEmpty
+                bool isPinned = pinned.Contains(uid);
+                bool rectOk = rect.HasValue && !tb.IsEmpty
                              && rect.Value.Width > 0 && rect.Value.Top >= tb.Top - 2 && rect.Value.Bottom <= tb.Bottom + 2
                              && rect.Value.Left >= tb.Left && rect.Value.Right <= tb.Right;
+                layoutInfo[r.Key] = "ícone " + uid + " · fixado: " + (isPinned ? "sim" : "não") + " · posição: "
+                                  + (rect.HasValue ? rect.Value.Left + "," + rect.Value.Top + " " + rect.Value.Width + "x" + rect.Value.Height : "nenhuma")
+                                  + (rectOk ? "" : " (fora da barra " + tb.Left + "," + tb.Top + " " + tb.Width + "x" + tb.Height + ")");
+                // Fixado, mas o Windows não informou a posição agora (tela bloqueada ou em suspensão, jogo em tela cheia,
+                // Explorer reorganizando a barra): mantém como está. Antes, o ícone virava o número simples de "não fixado".
+                if (isPinned && !rectOk) continue;
+                bool onBar = isPinned && rectOk;
                 EnsureIcon(r, onBar);
                 o.Show(r, onBar ? rect : null);
             }
@@ -2357,8 +2515,9 @@ namespace BatteryTray
                 }
                 m.AddSeparator();
             }
-            m.Items.Add(new ActionItem("", "Atualizar agora", RefreshNow, null, s));
+            m.Items.Add(new StatusItem("", () => refreshStatus ?? "Atualizar agora", RefreshFromMenu, s));
             m.Items.Add(new ActionItem("", "Iniciar com o Windows", () => SetAutoStart(!IsAutoStart()), IsAutoStart, s));
+            m.Items.Add(new ActionItem("\uEA8F", "Avisar bateria baixa", () => SetAlerts(!AlertsOn()), AlertsOn, s));
             m.Items.Add(new UpdateItem(() => available, () => updateStatus, () => CheckUpdates(true), ApplyUpdate, s));
             m.Items.Add(new StatusItem("", () => diagStatus ?? "Gerar diagnóstico", RunDiagnostics, s));
             m.AddSeparator();
