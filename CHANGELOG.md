@@ -12,6 +12,12 @@ Como usar (mantenedor):
 
 ## [Não publicado]
 
+## [1.3.4] - 2026-11-17
+
+### Correções
+- Quando a bandeja se reorganizava (por exemplo, ao tirar um print), o desenho dos aparelhos ficava até 2 segundos fora do lugar, às vezes por cima da setinha `^`. Agora o app confere a posição dos ícones 4 vezes por segundo e acompanha a mudança na hora.
+- Quando o Windows não informa a posição de um ícone fixado, o desenho some até a posição voltar, em vez de ficar parado num lugar que pode estar errado.
+
 ## [1.3.3] - 2026-11-17
 
 ### Novidades

@@ -1864,7 +1864,7 @@ namespace BatteryTray
     static class Updater
     {
         // Ao publicar uma versão nova, mude este número e crie a tag "v" + número (veja release.ps1).
-        public const string Version = "1.3.3";
+        public const string Version = "1.3.4";
         const string Repo = "HenriqueGomez/BatteryTray";
         const string Agent = "BatteryTray-Updater";
 
@@ -2224,7 +2224,18 @@ namespace BatteryTray
         readonly TrayIcons tray = new TrayIcons();
         readonly SynchronizationContext ui;
         readonly System.Threading.Timer poll;
-        readonly System.Windows.Forms.Timer layoutTimer;
+        readonly System.Windows.Forms.Timer layoutTimer, watchTimer;
+        readonly Dictionary<string, Rectangle?> placedAt = new Dictionary<string, Rectangle?>(); // posição usada no último Layout (ícones fixados)
+
+        // Se algum ícone fixado mudou de lugar desde o último Layout, refaz na hora (o desenho não fica no lugar antigo).
+        void WatchPositions()
+        {
+            foreach (var kv in placedAt)
+            {
+                if (!tray.Has(kv.Key)) continue;
+                if (tray.Rect(tray.UidOf(kv.Key)) != kv.Value) { Layout(); return; }
+            }
+        }
         const string HiddenKey = @"Software\BatteryTray\Hidden";
         readonly HashSet<string> hidden = new HashSet<string>();
         ModernMenu menu;
@@ -2333,6 +2344,10 @@ namespace BatteryTray
             layoutTimer = new System.Windows.Forms.Timer { Interval = 2000 };
             layoutTimer.Tick += (s, e) => Layout();
             layoutTimer.Start();
+            // a bandeja se reorganiza sem avisar (ícone novo, a "^" aparece ou some): confere as posições 4x por segundo
+            watchTimer = new System.Windows.Forms.Timer { Interval = 250 };
+            watchTimer.Tick += (s, e) => WatchPositions();
+            watchTimer.Start();
             SystemEvents.UserPreferenceChanged += (s, e) => { foreach (var o in overlays.Values) o.Invalidate(); Layout(); };
             poll = new System.Threading.Timer(_ => Tick(), null, 0, 60000);
             // verifica atualizações 20 s depois de abrir e a cada 6 horas
@@ -2471,9 +2486,11 @@ namespace BatteryTray
                 layoutInfo[r.Key] = "ícone " + uid + " · fixado: " + (isPinned ? "sim" : "não") + " · posição: "
                                   + (rect.HasValue ? rect.Value.Left + "," + rect.Value.Top + " " + rect.Value.Width + "x" + rect.Value.Height : "nenhuma")
                                   + (rectOk ? "" : " (fora da barra " + tb.Left + "," + tb.Top + " " + tb.Width + "x" + tb.Height + ")");
+                if (isPinned) placedAt[r.Key] = rect; else placedAt.Remove(r.Key);
                 // Fixado, mas o Windows não informou a posição agora (tela bloqueada ou em suspensão, jogo em tela cheia,
-                // Explorer reorganizando a barra): mantém como está. Antes, o ícone virava o número simples de "não fixado".
-                if (isPinned && !rectOk) continue;
+                // Explorer reorganizando a barra): esconde o desenho até a posição voltar, sem trocar o ícone pelo
+                // número simples de "não fixado" e sem deixar o desenho num lugar que pode não ser mais o dele.
+                if (isPinned && !rectOk) { o.Show(r, null); continue; }
                 bool onBar = isPinned && rectOk;
                 EnsureIcon(r, onBar);
                 o.Show(r, onBar ? rect : null);
@@ -2541,7 +2558,7 @@ namespace BatteryTray
 
         protected override void ExitThreadCore()
         {
-            poll.Dispose(); layoutTimer.Stop(); if (updateTimer != null) updateTimer.Dispose();
+            poll.Dispose(); layoutTimer.Stop(); watchTimer.Stop(); if (updateTimer != null) updateTimer.Dispose();
             foreach (var o in overlays.Values) o.Dispose();
             tray.Dispose();
             base.ExitThreadCore();
