@@ -949,7 +949,6 @@ namespace BatteryTray
     {
         IntPtr taskbar;
         string lastSig;
-        public ContextMenuStrip Menu;
         public Action LeftClick;
 
         void EnsureAttached()
@@ -1014,7 +1013,6 @@ namespace BatteryTray
             {
                 case 0x21: m.Result = (IntPtr)3; return;                                   // WM_MOUSEACTIVATE -> MA_NOACTIVATE
                 case 0x202: if (LeftClick != null) LeftClick(); return;                    // WM_LBUTTONUP
-                case 0x205: if (Menu != null) Menu.Show(Cursor.Position); return;          // WM_RBUTTONUP
             }
             base.WndProc(ref m);
         }
@@ -1231,7 +1229,6 @@ namespace BatteryTray
         bool allowClose;
         bool wasDown = true;
         readonly System.Windows.Forms.Timer watch = new System.Windows.Forms.Timer { Interval = 40 };
-        public static string DebugLog; // diagnóstico opcional
 
         public void Hold() { } // mantido por compatibilidade com os itens
 
@@ -1294,7 +1291,6 @@ namespace BatteryTray
         {
             if (e.CloseReason == ToolStripDropDownCloseReason.Keyboard) allowClose = true; // Esc
             if (!allowClose) e.Cancel = true;
-            if (DebugLog != null) File.AppendAllText(DebugLog, DateTime.Now.ToString("HH:mm:ss.fff ") + "closing reason=" + e.CloseReason + " cancel=" + e.Cancel + Environment.NewLine);
             base.OnClosing(e);
         }
 
@@ -1474,7 +1470,7 @@ namespace BatteryTray
     static class Updater
     {
         // Ao publicar uma versão nova, mude este número e crie a tag "v" + número (veja release.ps1).
-        public const string Version = "1.0.0";
+        public const string Version = "1.1.0";
         const string Repo = "HenriqueGomez/BatteryTray";
         const string Agent = "BatteryTray-Updater";
 
@@ -1748,7 +1744,8 @@ namespace BatteryTray
         void ShowMenu()
         {
             if (menu != null) { menu.Dismiss(); menu.Dispose(); }
-            if (updating == 0) updateStatus = null; // mensagens antigas ("já atualizado") não reaparecem            menu = BuildMenu();
+            if (updating == 0) updateStatus = null; // mensagens antigas ("já atualizado") não reaparecem
+            menu = BuildMenu();
             Native.SetForegroundWindow(tray.Handle); // faz o menu fechar ao clicar fora
             menu.Show(Cursor.Position, ToolStripDropDownDirection.AboveLeft);
         }
