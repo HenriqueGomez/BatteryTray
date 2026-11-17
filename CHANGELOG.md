@@ -12,6 +12,14 @@ Como usar (mantenedor):
 
 ## [Não publicado]
 
+## [1.2.0] - 2026-11-17
+
+### Novidades
+- **Gerar diagnóstico**, no menu: cria um arquivo de texto na pasta do app com tudo o que o BatteryTray encontra no seu PC (aparelhos USB e Bluetooth, controles, programas dos fabricantes e a leitura de cada um). Se um aparelho não aparecer, anexe esse arquivo ao abrir uma *issue*. O arquivo não tem números de série nem endereços Bluetooth.
+
+### Correções
+- Teclados com teclas analógicas ou com função de mouse, como o Keychron K4 HE, eram identificados como controle ou mouse.
+
 ## [1.1.0] - 2026-11-17
 
 ### Correções

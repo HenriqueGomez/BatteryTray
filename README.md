@@ -32,6 +32,7 @@ O menu abre com o clique direito em qualquer aparelho, ou no ícone de bateria q
 - **Atualizar agora:** relê as baterias. Isso também acontece sozinho a cada minuto.
 - **Iniciar com o Windows.**
 - **Verificar atualizações:** mostra a versão instalada e, quando existir uma nova, vira **Atualizar para vX.Y.Z**. A atualização baixa o novo `.exe`, confere o SHA-256 publicado no Release, troca o arquivo e reabre o app.
+- **Gerar diagnóstico:** cria o arquivo `BatteryTray-diagnostico-<data>.txt` na pasta do app e abre a pasta com ele selecionado. Leva alguns segundos. Veja [Um aparelho não aparece?](#um-aparelho-não-aparece)
 
 ## O que ele detecta
 
@@ -49,13 +50,23 @@ O menu abre com o clique direito em qualquer aparelho, ou no ícone de bateria q
 - controles cujo receptor se apresenta ao Windows como "com fio" (por exemplo, o dongle da 8BitDo);
 - aparelhos Logitech que só informam a tensão: nesse caso a porcentagem é uma **estimativa**.
 
-Só foi testado com um Logitech G502 X PLUS e um Razer Kraken V3 Pro. Outros aparelhos usam os mesmos protocolos, mas podem se comportar diferente. Se encontrar algum problema, abra uma *issue* com o modelo.
+Só foi testado com um Logitech G502 X PLUS e um Razer Kraken V3 Pro. Outros aparelhos usam os mesmos protocolos, mas podem se comportar diferente.
+
+### Um aparelho não aparece?
+
+1. Ligue o aparelho e deixe-o conectado.
+2. No menu, clique em **Gerar diagnóstico**. A pasta do app abre com o arquivo `BatteryTray-diagnostico-<data>.txt` selecionado.
+3. Abra uma [*issue*](https://github.com/HenriqueGomez/BatteryTray/issues/new) com o modelo do aparelho e anexe o arquivo.
+
+O arquivo lista o que o app encontra: aparelhos USB/HID e as funções que cada um declara, aparelhos Bluetooth e se informam bateria ao Windows, controles XInput, programas dos fabricantes abertos e a leitura de cada fonte. Ele **não** tem números de série, endereços Bluetooth nem caminhos completos dos aparelhos, mas mostra os nomes deles. Como alguns nomes Bluetooth incluem o nome do dono, dê uma olhada antes de compartilhar.
+
+Se o app nem abrir, rode `BatteryTray.exe --diagnostico` no terminal, na pasta dele: o arquivo é gerado sem abrir a interface. Quando não é possível gravar na pasta do app, ele vai para a Área de Trabalho.
 
 ## Privacidade e o que o app acessa
 
 - **Internet:** só o `api.github.com` e os downloads deste repositório, para verificar e baixar atualizações. Isso acontece ao abrir, a cada 6 horas ou quando você pede pelo menu. Nenhum dado seu é enviado, além do que qualquer acesso à internet já revela (como o seu IP para o GitHub).
 - **Aparelhos:** lê a bateria conversando direto com receptores Logitech e Razer (somente comandos de leitura) e com as propriedades de dispositivos do Windows.
-- **Arquivos:** lê os logs do Razer Synapse em `%LOCALAPPDATA%\Razer\RazerAppEngine\User Data\Logs`.
+- **Arquivos:** lê os logs do Razer Synapse em `%LOCALAPPDATA%\Razer\RazerAppEngine\User Data\Logs`. Só grava o arquivo de diagnóstico quando você pede, e ele não é enviado a lugar nenhum.
 - **Registro do Windows, só no seu usuário:**
   - `HKCU\Software\BatteryTray` guarda os aparelhos ocultos e a identificação de cada ícone;
   - `HKCU\...\CurrentVersion\Run` guarda o início com o Windows, se você ligar.

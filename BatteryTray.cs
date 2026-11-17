@@ -57,6 +57,7 @@ namespace BatteryTray
         [DllImport("hid.dll")] static extern bool HidD_FreePreparsedData(IntPtr p);
         [DllImport("hid.dll")] static extern int HidP_GetCaps(IntPtr p, out HIDP_CAPS c);
         [DllImport("hid.dll")] static extern bool HidD_GetProductString(SafeFileHandle h, byte[] b, int len);
+        [DllImport("hid.dll")] static extern bool HidD_GetManufacturerString(SafeFileHandle h, byte[] b, int len);
         [DllImport("setupapi.dll", CharSet = CharSet.Unicode)] static extern IntPtr SetupDiGetClassDevs(ref Guid g, IntPtr e, IntPtr hwnd, int flags);
         [DllImport("setupapi.dll")] static extern bool SetupDiEnumDeviceInterfaces(IntPtr s, IntPtr d, ref Guid g, int i, ref SP_DEVICE_INTERFACE_DATA did);
         [DllImport("setupapi.dll", CharSet = CharSet.Unicode)] static extern bool SetupDiGetDeviceInterfaceDetail(IntPtr s, ref SP_DEVICE_INTERFACE_DATA did, IntPtr detail, int size, out int req, IntPtr dev);
@@ -94,8 +95,12 @@ namespace BatteryTray
 
         // Procura um campo de bateria padrão HID e devolve a % (ou -1):
         //  Generic Device Controls (0x06) / Battery Strength (0x20)  ·  Battery System (0x85) / RemainingCapacity (0x66)
-        public static int ReadStandardBattery(Info info)
+        public static int ReadStandardBattery(Info info) { bool f; return ReadStandardBattery(info, out f); }
+
+        // hasField: o aparelho declara um campo de bateria (mesmo que a leitura tenha falhado)
+        public static int ReadStandardBattery(Info info, out bool hasField)
         {
+            hasField = false;
             using (var h = Open(info.Path))
             {
                 if (h.IsInvalid) return -1;
@@ -115,6 +120,7 @@ namespace BatteryTray
                             ushort usage = c.UsageMin;
                             bool battery = (c.UsagePage == 0x06 && usage == 0x20) || (c.UsagePage == 0x85 && usage == 0x66);
                             if (!battery || c.IsRange != 0) continue;
+                            hasField = true;
                             var rep = new byte[repLen]; rep[0] = c.ReportID;
                             bool ok = type == 2 ? HidD_GetFeature(h, rep, rep.Length) : HidD_GetInputReport(h, rep, rep.Length);
                             if (!ok) continue;
@@ -130,6 +136,26 @@ namespace BatteryTray
                 finally { HidD_FreePreparsedData(pp); }
             }
             return -1;
+        }
+
+        public static string Manufacturer(string path)
+        {
+            using (var h = CreateFile(path, 0, 3, IntPtr.Zero, 3, 0, IntPtr.Zero))
+            {
+                var b = new byte[256];
+                if (h.IsInvalid || !HidD_GetManufacturerString(h, b, b.Length)) return null;
+                return Encoding.Unicode.GetString(b).TrimEnd('\0');
+            }
+        }
+
+        // Por onde o aparelho está ligado, pelo caminho do Windows (sem números de série nem endereços).
+        public static string Bus(string path)
+        {
+            string p = path.ToLowerInvariant();
+            if (p.Contains("{00001124-0000-1000-8000-00805f9b34fb}")) return "Bluetooth";
+            if (p.Contains("{00001812-0000-1000-8000-00805f9b34fb}")) return "Bluetooth LE";
+            if (p.StartsWith(@"\\?\hid#vid_")) return "USB";
+            return "outro";
         }
 
         public static List<Info> Enumerate()
@@ -224,7 +250,7 @@ namespace BatteryTray
 
         public void Dispose() { closed = true; try { fs.Dispose(); } catch { } }
 
-        public static string DebugLog; // caminho do log (só no modo --dump)
+        public static string DebugLog; // caminho do log (só no --dump e durante o diagnóstico)
         static void Log(string s) { if (DebugLog != null) File.AppendAllText(DebugLog, DateTime.Now.ToString("HH:mm:ss.fff ") + s + Environment.NewLine); }
         static string Hex(byte[] b) { var sb = new StringBuilder(); foreach (var x in b) sb.AppendFormat("{0:X2} ", x); return sb.ToString(); }
     }
@@ -525,13 +551,17 @@ namespace BatteryTray
         }
 
         // Funções declaradas pelas coleções HID do aparelho (Generic Desktop: 2 mouse, 6 teclado, 4/5 joystick/gamepad).
+        // Vale a primeira (interface e coleção de menor número): é a função principal. Teclados costumam ter também
+        // coleções de mouse ou joystick (teclas analógicas), e receptores de mouse, uma de teclado.
         public static DeviceKind FromHid(IEnumerable<Hid.Info> cols)
         {
-            var list = cols.ToList();
-            if (list.Any(c => c.UsagePage == 1 && (c.Usage == 4 || c.Usage == 5))) return DeviceKind.Controller;
-            if (list.Any(c => c.UsagePage == 1 && c.Usage == 2)) return DeviceKind.Mouse;
-            if (list.Any(c => c.UsagePage == 1 && c.Usage == 6)) return DeviceKind.Keyboard;
-            if (list.Any(c => c.UsagePage == 0x0B)) return DeviceKind.Headset; // Telephony (botões de headset)
+            foreach (var c in cols.Where(c => c.UsagePage == 1).OrderBy(c => c.Path, StringComparer.OrdinalIgnoreCase))
+            {
+                if (c.Usage == 4 || c.Usage == 5) return DeviceKind.Controller;
+                if (c.Usage == 2) return DeviceKind.Mouse;
+                if (c.Usage == 6) return DeviceKind.Keyboard;
+            }
+            if (cols.Any(c => c.UsagePage == 0x0B)) return DeviceKind.Headset; // Telephony (botões de headset)
             return DeviceKind.Other;
         }
 
@@ -731,6 +761,48 @@ namespace BatteryTray
             foreach (var r in last.Values) if (!seen.Contains(r.Key)) r.Online = false;
             return last.Values.ToList();
         }
+
+        static readonly DEVPROPKEY KeyEnumerator = new DEVPROPKEY("a45c254e-df1c-4efd-8020-67d146a850e0", 24);
+        static readonly Guid BluetoothClass = new Guid("e0cbf06c-cd8b-4647-bb8a-263b43f0f974");
+
+        public class DiagDevice { public string Name, Bus; public DeviceKind Kind; public int Battery = -1; }
+
+        // Diagnóstico: aparelhos Bluetooth pareados e tudo que informa bateria ao Windows,
+        // agrupados pelo "container" (as várias partes de um mesmo aparelho físico).
+        public static List<DiagDevice> Diagnose()
+        {
+            var res = new Dictionary<string, DiagDevice>();
+            IntPtr set = SetupDiGetClassDevs(IntPtr.Zero, null, IntPtr.Zero, 0x2 | 0x4);
+            try
+            {
+                var d = new SP_DEVINFO_DATA(); d.cbSize = Marshal.SizeOf(d);
+                for (int i = 0; SetupDiEnumDeviceInfo(set, i, ref d); i++)
+                {
+                    int t;
+                    string en = (Str(Prop(set, ref d, KeyEnumerator, out t)) ?? "").ToUpperInvariant();
+                    bool bt = d.ClassGuid == BluetoothClass && (en == "BTHENUM" || en == "BTHLE");
+                    var b = Prop(set, ref d, KeyBattery, out t);
+                    bool hasBattery = b != null && b.Length >= 1 && b[0] <= 100;
+                    if (!bt && !hasBattery) continue;
+                    var cont = Prop(set, ref d, KeyContainer, out t);
+                    string key = cont != null && cont.Length == 16 ? new Guid(cont).ToString() : "#" + i;
+                    DiagDevice dd;
+                    if (!res.TryGetValue(key, out dd)) res[key] = dd = new DiagDevice();
+                    string name = Str(Prop(set, ref d, KeyFriendly, out t)) ?? Str(Prop(set, ref d, KeyDesc, out t));
+                    if (bt || dd.Name == null)
+                    {
+                        dd.Name = name ?? dd.Name;
+                        dd.Bus = en == "BTHLE" ? "Bluetooth LE" : en == "BTHENUM" ? "Bluetooth" : en;
+                    }
+                    var cod = Prop(set, ref d, KeyCod, out t);
+                    if (cod != null && cod.Length >= 4) dd.Kind = DeviceClassifier.Best(DeviceClassifier.FromCod(BitConverter.ToUInt32(cod, 0)), dd.Kind);
+                    if (hasBattery) dd.Battery = b[0];
+                }
+            }
+            finally { SetupDiDestroyDeviceInfoList(set); }
+            foreach (var dd in res.Values) dd.Kind = DeviceClassifier.Best(dd.Kind, DeviceClassifier.FromName(dd.Name));
+            return res.Values.OrderBy(x => x.Name).ToList();
+        }
     }
 
     // ------------------------------------------------------------------ XInput
@@ -760,6 +832,31 @@ namespace BatteryTray
                     Online = true,
                     Updated = DateTime.Now
                 });
+            }
+            return res;
+        }
+
+        // Diagnóstico: o que cada uma das 4 portas XInput informa.
+        public static List<string> Diagnose()
+        {
+            var res = new List<string>();
+            string[] types = { "desconectado", "com fio (o Windows não recebe a bateria; acontece com alguns receptores sem fio)", "pilhas alcalinas", "bateria NiMH" };
+            string[] levels = { "vazia", "baixa", "média", "cheia" };
+            for (int i = 0; i < 4; i++)
+            {
+                BAT b; int r;
+                try { r = XInputGetBatteryInformation(i, 0, out b); }
+                catch (Exception ex) { res.Add("XInput indisponível: " + ex.Message); break; }
+                string line = "Porta " + (i + 1) + ": ";
+                if (r == 1167) line += "vazia";
+                else if (r != 0) line += "erro " + r;
+                else if (b.Type == 0) line += "vazia";
+                else
+                {
+                    line += "controle conectado, " + (b.Type < types.Length ? types[b.Type] : b.Type == 0xFF ? "tipo de bateria desconhecido" : "tipo " + b.Type);
+                    if (b.Type >= 2) line += ", nível " + levels[Math.Min((int)b.Level, 3)];
+                }
+                res.Add(line);
             }
             return res;
         }
@@ -1476,7 +1573,7 @@ namespace BatteryTray
     static class Updater
     {
         // Ao publicar uma versão nova, mude este número e crie a tag "v" + número (veja release.ps1).
-        public const string Version = "1.1.0";
+        public const string Version = "1.2.0";
         const string Repo = "HenriqueGomez/BatteryTray";
         const string Agent = "BatteryTray-Updater";
 
@@ -1572,6 +1669,238 @@ namespace BatteryTray
         }
     }
 
+    // ------------------------------------------------------------------ Diagnóstico (arquivo de texto para anexar em uma issue)
+    // Lista tudo que o app enxerga: leituras de cada fonte, aparelhos USB/HID, Bluetooth, XInput e a conversa HID++.
+    // Não inclui números de série, endereços Bluetooth nem caminhos completos dos aparelhos.
+    static class Diagnostics
+    {
+        static readonly Dictionary<ushort, string> Vendors = new Dictionary<ushort, string> {
+            { 0x046D, "Logitech" }, { 0x1532, "Razer" }, { 0x045E, "Microsoft" }, { 0x054C, "Sony" }, { 0x057E, "Nintendo" },
+            { 0x2DC8, "8BitDo" }, { 0x1038, "SteelSeries" }, { 0x1B1C, "Corsair" }, { 0x0951, "HyperX" }, { 0x03F0, "HP/HyperX" },
+            { 0x3434, "Keychron" }, { 0x0B05, "ASUS" }, { 0x1E7D, "ROCCAT/Turtle Beach" }, { 0x10F5, "Turtle Beach" }, { 0x1395, "EPOS/Sennheiser" },
+            { 0x0D8C, "C-Media (áudio USB)" }, { 0x046A, "Cherry" }, { 0x258A, "Sinowealth (mouses/teclados genéricos)" }, { 0x093A, "Pixart" },
+            { 0x248A, "Maxxter/Telink" }, { 0x25A7, "Areson" }, { 0x3554, "Compx (mouses genéricos)" }, { 0x0E8D, "MediaTek" }, { 0x8087, "Intel" },
+            { 0x0BDA, "Realtek" }, { 0x05AC, "Apple" }, { 0x2717, "Xiaomi" }, { 0x04E8, "Samsung" }, { 0x1A86, "QinHeng" }, { 0x0483, "STMicroelectronics" },
+        };
+
+        static readonly string[,] Programs = {
+            { "Logitech G HUB", "lghub_agent,lghub" }, { "Logi Options+", "logioptionsplus_agent" },
+            { "Razer Synapse 4", "RazerAppEngine" }, { "Razer Synapse 3", "Razer Synapse 3,Razer Synapse Service" },
+            { "SteelSeries GG", "SteelSeriesGG" }, { "Corsair iCUE", "iCUE" },
+        };
+
+        static string Usage(Hid.Info c)
+        {
+            if (c.Vid == 0x046D && c.UsagePage == 0xFF00 && c.Usage == 1) return "HID++ curto (Logitech)";
+            if (c.Vid == 0x046D && c.UsagePage == 0xFF00 && c.Usage == 2) return "HID++ longo (Logitech)";
+            if (c.Vid == 0x046D && c.UsagePage == 0xFF43) return "HID++ (Logitech G)";
+            if (c.UsagePage == 1)
+                switch (c.Usage) { case 1: return "ponteiro"; case 2: return "mouse"; case 4: return "joystick"; case 5: return "gamepad"; case 6: return "teclado"; case 0x80: return "controle do sistema"; }
+            if (c.UsagePage == 0x0C) return "teclas de mídia";
+            if (c.UsagePage == 0x0B) return "telefonia (botões de headset)";
+            if (c.UsagePage == 0x0D) return "caneta/toque";
+            if (c.UsagePage == 0x84 || c.UsagePage == 0x85) return "bateria/energia";
+            if (c.UsagePage >= 0xFF00) return "do fabricante";
+            return "outro";
+        }
+
+        static string Kind(DeviceKind k)
+        {
+            switch (k) { case DeviceKind.Mouse: return "Mouse"; case DeviceKind.Headset: return "Headset"; case DeviceKind.Keyboard: return "Teclado"; case DeviceKind.Controller: return "Controle"; default: return "Outro"; }
+        }
+
+        static string Source(string key)
+        {
+            string p = key == null ? "" : key.Split(':')[0];
+            switch (p) { case "logi": return "Logitech HID++"; case "razer": return "Razer Synapse"; case "razerhid": return "Razer USB"; case "win": return "Windows/Bluetooth"; case "hid": return "HID genérico"; case "xinput": return "XInput"; default: return p; }
+        }
+
+        public static string Describe(Reading r)
+        {
+            string pct = r.Percent < 0 ? "bateria ?" : (r.LevelText != null ? "~" : "") + r.Percent + "%";
+            return string.Format("{0,-9} {1} · {2} · {3}{4} · fonte: {5}{6}", Kind(r.Kind), r.Name ?? "(sem nome)", pct, r.Online ? "ligado" : "desligado",
+                r.Charging ? " · carregando" : "", Source(r.Key), r.Updated > DateTime.MinValue ? " · lido " + r.Updated.ToString("dd/MM HH:mm") : "");
+        }
+
+        static string WindowsVersion()
+        {
+            try
+            {
+                using (var k = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion"))
+                {
+                    string name = (k.GetValue("ProductName") ?? "Windows").ToString(), disp = (k.GetValue("DisplayVersion") ?? "").ToString();
+                    string build = (k.GetValue("CurrentBuild") ?? "?").ToString(), ubr = (k.GetValue("UBR") ?? "").ToString();
+                    int b; if (int.TryParse(build, out b) && b >= 22000) name = name.Replace("Windows 10", "Windows 11"); // o registro ainda diz "10" no 11
+                    return string.Format("{0} {1} (build {2}{3}), {4}", name, disp, build, ubr == "" ? "" : "." + ubr, Environment.Is64BitOperatingSystem ? "64 bits" : "32 bits").Replace("  ", " ");
+                }
+            }
+            catch { return Environment.OSVersion.ToString(); }
+        }
+
+        static string DotNetVersion()
+        {
+            try { using (var k = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full")) return "release " + k.GetValue("Release"); }
+            catch { return Environment.Version.ToString(); }
+        }
+
+        static void Section(StringBuilder sb, string title)
+        {
+            sb.AppendLine().AppendLine(title).AppendLine(new string('-', title.Length));
+        }
+
+        // Pasta do .exe; se não der para gravar lá (ex.: Arquivos de Programas), a Área de Trabalho.
+        public static string Write(IList<string> shownNow)
+        {
+            string text = Build(shownNow);
+            string file = "BatteryTray-diagnostico-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".txt";
+            foreach (var dir in new[] { Path.GetDirectoryName(Application.ExecutablePath), Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory) })
+            {
+                try { string p = Path.Combine(dir, file); File.WriteAllText(p, text, new UTF8Encoding(true)); return p; }
+                catch (UnauthorizedAccessException) { }
+                catch (IOException) { }
+            }
+            throw new IOException("não foi possível gravar o arquivo de diagnóstico");
+        }
+
+        static string Build(IList<string> shownNow)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("BatteryTray - diagnóstico de dispositivos");
+            sb.AppendLine("=========================================");
+            sb.AppendLine("Gerado em:  " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+            sb.AppendLine("BatteryTray: v" + Updater.Version);
+            sb.AppendLine("Windows:    " + WindowsVersion());
+            sb.AppendLine(".NET:       " + DotNetVersion());
+            sb.AppendLine();
+            sb.AppendLine("Este arquivo ajuda a descobrir por que um aparelho não aparece ou mostra a bateria errada.");
+            sb.AppendLine("Para pedir ajuda, abra uma issue em https://github.com/HenriqueGomez/BatteryTray/issues e anexe este arquivo.");
+            sb.AppendLine("Ele não tem números de série, endereços Bluetooth nem caminhos completos dos aparelhos, mas mostra os nomes");
+            sb.AppendLine("deles. Alguns nomes Bluetooth incluem o nome do dono (ex.: \"Fone do Fulano\"): revise antes de compartilhar.");
+
+            if (shownNow != null)
+            {
+                Section(sb, "1. O que o BatteryTray mostra agora");
+                if (shownNow.Count == 0) sb.AppendLine("(nenhum aparelho)");
+                foreach (var l in shownNow) sb.AppendLine(l);
+            }
+
+            // leitura nova de cada fonte, com a conversa HID++ gravada num arquivo temporário
+            Section(sb, "2. Leitura nova, fonte por fonte");
+            string hppLog = Path.Combine(Path.GetTempPath(), "BatteryTray-hpp-" + Guid.NewGuid().ToString("N") + ".log");
+            string prevLog = HppChannel.DebugLog;
+            HppChannel.DebugLog = hppLog;
+            var sources = new Dictionary<string, IBatterySource> {
+                { "Logitech HID++", new LogitechSource() }, { "Razer Synapse 4 (logs)", new RazerLogSource() }, { "Razer USB (mouses/teclados)", new RazerHidSource() },
+                { "Windows/Bluetooth", new WindowsBatterySource() }, { "HID genérico", new GenericHidSource() }, { "XInput", new XInputSource() } };
+            try
+            {
+                foreach (var kv in sources)
+                {
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+                    try
+                    {
+                        var list = kv.Value.Poll();
+                        sb.AppendFormat("{0} ({1:0.0} s): {2}", kv.Key, sw.Elapsed.TotalSeconds, list.Count == 0 ? "nada encontrado" : list.Count + (list.Count == 1 ? " aparelho" : " aparelhos")).AppendLine();
+                        foreach (var r in list) sb.AppendLine("   " + Describe(r));
+                    }
+                    catch (Exception ex) { sb.AppendFormat("{0}: ERRO {1}: {2}", kv.Key, ex.GetType().Name, ex.Message).AppendLine(); }
+                }
+            }
+            finally { HppChannel.DebugLog = prevLog; }
+
+            Section(sb, "3. Aparelhos USB/HID conectados");
+            try
+            {
+                var all = Hid.Enumerate();
+                foreach (var grp in all.GroupBy(i => i.Vid.ToString("X4") + ":" + i.Pid.ToString("X4") + " " + Hid.Bus(i.Path)).OrderBy(g => g.Key))
+                {
+                    var first = grp.First();
+                    string vendor; Vendors.TryGetValue(first.Vid, out vendor);
+                    string product = grp.Select(i => i.Product).FirstOrDefault(p => !string.IsNullOrEmpty(p));
+                    string maker = null; try { maker = Hid.Manufacturer(first.Path); } catch { }
+                    sb.AppendLine();
+                    sb.AppendFormat("{0}  {1} \"{2}\"{3}", grp.Key, vendor ?? "fabricante desconhecido", product ?? "sem nome",
+                        string.IsNullOrEmpty(maker) ? "" : " (fabricante informado: " + maker + ")").AppendLine();
+                    sb.AppendLine("   tipo provável: " + Kind(DeviceClassifier.Best(DeviceClassifier.FromHid(grp), DeviceClassifier.FromName(product))));
+                    bool field = false; int pct = -1;
+                    foreach (var c in grp.OrderBy(c => c.Path))
+                    {
+                        var mi = Regex.Match(c.Path, "&mi_([0-9a-f]{2})", RegexOptions.IgnoreCase);
+                        var col = Regex.Match(c.Path, "&col([0-9a-f]{2})", RegexOptions.IgnoreCase);
+                        sb.AppendFormat("   coleção {0:X4}/{1:X4} {2,-30} entrada {3,3} B · feature {4,3} B{5}{6}{7}", c.UsagePage, c.Usage, Usage(c), c.InLen, c.FeatLen,
+                            mi.Success ? " · interface " + mi.Groups[1].Value : "", col.Success ? " · col " + col.Groups[1].Value : "",
+                            c.Vid == 0x1532 && c.FeatLen == 91 ? " · relatório Razer" : "").AppendLine();
+                        if (c.Vid != 0x046D && c.Vid != 0x1532 && pct < 0)
+                        {
+                            bool f; int v = -1;
+                            try { v = Hid.ReadStandardBattery(c, out f); } catch { f = false; }
+                            if (f) { field = true; pct = v; }
+                        }
+                    }
+                    if (first.Vid != 0x046D && first.Vid != 0x1532)
+                        sb.AppendLine("   campo de bateria padrão HID: " + (!field ? "não tem" : pct >= 0 ? pct + "%" : "tem, mas a leitura falhou"));
+                }
+            }
+            catch (Exception ex) { sb.AppendLine("ERRO ao listar: " + ex.Message); }
+
+            Section(sb, "4. Bluetooth e aparelhos que informam bateria ao Windows");
+            try
+            {
+                var bt = WindowsBatterySource.Diagnose();
+                if (bt.Count == 0) sb.AppendLine("(nenhum)");
+                foreach (var d in bt)
+                    sb.AppendFormat("\"{0}\" · {1} · {2} · bateria: {3}", d.Name ?? "sem nome", d.Bus ?? "?", Kind(d.Kind),
+                        d.Battery >= 0 ? d.Battery + "%" : "não informa ao Windows").AppendLine();
+            }
+            catch (Exception ex) { sb.AppendLine("ERRO: " + ex.Message); }
+
+            Section(sb, "5. Controles XInput");
+            try { foreach (var l in XInputSource.Diagnose()) sb.AppendLine(l); }
+            catch (Exception ex) { sb.AppendLine("ERRO: " + ex.Message); }
+
+            Section(sb, "6. Programas dos fabricantes abertos");
+            for (int i = 0; i < Programs.GetLength(0); i++)
+            {
+                bool open = Programs[i, 1].Split(',').Any(n => { var ps = System.Diagnostics.Process.GetProcessesByName(n); bool any = ps.Length > 0; foreach (var p in ps) p.Dispose(); return any; });
+                sb.AppendLine(Programs[i, 0] + ": " + (open ? "aberto" : "não"));
+            }
+            try
+            {
+                string razerLogs = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), @"Razer\RazerAppEngine\User Data\Logs");
+                var logs = Directory.Exists(razerLogs) ? new DirectoryInfo(razerLogs).GetFiles("lighting-engine*.log") : new FileInfo[0];
+                sb.AppendLine("Logs do Razer Synapse 4: " + (logs.Length == 0 ? "não encontrados"
+                    : logs.Length + " arquivo(s), o mais recente de " + logs.Max(f => f.LastWriteTime).ToString("dd/MM/yyyy HH:mm")));
+            }
+            catch (Exception ex) { sb.AppendLine("Logs do Razer Synapse 4: erro " + ex.Message); }
+
+            Section(sb, "7. Detalhes técnicos: conversa HID++ com aparelhos Logitech");
+            try
+            {
+                if (File.Exists(hppLog)) { string t = File.ReadAllText(hppLog); sb.Append(t.Length == 0 ? "(nenhuma)" + Environment.NewLine : t); File.Delete(hppLog); }
+                else sb.AppendLine("(nenhuma: não há receptor ou aparelho Logitech com HID++)");
+            }
+            catch (Exception ex) { sb.AppendLine("ERRO: " + ex.Message); }
+            return sb.ToString();
+        }
+    }
+
+    // Item do menu cujo texto muda conforme o andamento (ex.: "Gerando diagnóstico...").
+    class StatusItem : FancyItem
+    {
+        readonly string glyph; readonly Func<string> label; readonly Action action;
+        public StatusItem(string glyph, Func<string> label, Action action, float s) : base(30, s)
+        { this.glyph = glyph; this.label = label; this.action = action; }
+
+        protected override void Draw(Graphics g, MenuTheme t, float s)
+        {
+            float cy = Height / 2f;
+            Glyph(g, glyph, 14, t.Text, 24 * s, cy);
+            using (var f = M.UiFont(12.5f)) DrawLabel(g, label(), f, t.Text, 44 * s, cy - f.Height / 2f - 1 * s, Width - 58 * s);
+        }
+
+        protected override void OnClick(EventArgs e) { action(); Invalidate(); base.OnClick(e); } // o menu continua aberto
+    }
+
     // ------------------------------------------------------------------ Aplicativo
     class OverlayApp : ApplicationContext
     {
@@ -1635,6 +1964,36 @@ namespace BatteryTray
         }
 
         void SetUpdateStatus(string s) { updateStatus = s; if (menu != null && menu.Visible) menu.Invalidate(true); }
+
+        // diagnóstico: grava o arquivo na pasta do .exe e abre o Explorer com ele selecionado
+        string diagStatus;
+        int diagRunning;
+
+        void RunDiagnostics()
+        {
+            if (Interlocked.CompareExchange(ref diagRunning, 1, 0) != 0) return;
+            var shown = Ordered().Select(r => (IsVisible(r.Key) ? "[visível] " : "[oculto]  ") + Diagnostics.Describe(r)).ToList();
+            SetDiagStatus("Gerando diagnóstico...");
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                // espera a leitura periódica terminar, para as duas não conversarem com os aparelhos ao mesmo tempo
+                while (Interlocked.CompareExchange(ref busy, 1, 0) != 0) Thread.Sleep(100);
+                string path = null;
+                try { path = Diagnostics.Write(shown); }
+                catch (Exception ex) { try { File.WriteAllText(Path.Combine(Path.GetTempPath(), "BatteryTray-diagnostico-erro.txt"), ex.ToString()); } catch { } }
+                finally { Interlocked.Exchange(ref busy, 0); }
+                ui.Post(__ =>
+                {
+                    Interlocked.Exchange(ref diagRunning, 0);
+                    if (path == null) { SetDiagStatus("Não foi possível gerar o diagnóstico"); return; }
+                    SetDiagStatus(null);
+                    if (menu != null) menu.Dismiss();
+                    try { System.Diagnostics.Process.Start("explorer.exe", "/select,\"" + path + "\""); } catch { }
+                }, null);
+            });
+        }
+
+        void SetDiagStatus(string s) { diagStatus = s; if (menu != null && menu.Visible) menu.Invalidate(true); }
 
         public OverlayApp()
         {
@@ -1751,6 +2110,7 @@ namespace BatteryTray
         {
             if (menu != null) { menu.Dismiss(); menu.Dispose(); }
             if (updating == 0) updateStatus = null; // mensagens antigas ("já atualizado") não reaparecem
+            if (diagRunning == 0) diagStatus = null;
             menu = BuildMenu();
             Native.SetForegroundWindow(tray.Handle); // faz o menu fechar ao clicar fora
             menu.Show(Cursor.Position, ToolStripDropDownDirection.AboveLeft);
@@ -1774,6 +2134,7 @@ namespace BatteryTray
             m.Items.Add(new ActionItem("", "Atualizar agora", RefreshNow, null, s));
             m.Items.Add(new ActionItem("", "Iniciar com o Windows", () => SetAutoStart(!IsAutoStart()), IsAutoStart, s));
             m.Items.Add(new UpdateItem(() => available, () => updateStatus, () => CheckUpdates(true), ApplyUpdate, s));
+            m.Items.Add(new StatusItem("", () => diagStatus ?? "Gerar diagnóstico", RunDiagnostics, s));
             m.AddSeparator();
             m.Items.Add(new ActionItem("", "Sair", ExitThread, null, s));
             return m;
@@ -1809,6 +2170,7 @@ namespace BatteryTray
         {
             if (args.Length > 0 && args[0] == "--dump") { Dump(); return; }
             if (args.Length > 0 && args[0] == "--autostart") { OverlayApp.SetAutoStart(true); return; }
+            if (args.Length > 0 && args[0] == "--diagnostico") { Diagnostics.Write(null); return; } // sem abrir a interface
             if (args.Length > 0 && args[0] == "--self-update") { SelfUpdateCli(args.Contains("--no-restart")); return; }
             bool updated = args.Contains("--updated");
             using (var mutex = new Mutex(false, "BatteryTray_SingleInstance"))
