@@ -1,0 +1,6 @@
+# executáveis gerados (o build.cmd recria; as versões oficiais ficam nos Releases)
+*.exe
+*.exe.sha256
+# saídas do modo de teste
+preview/
+update.txt

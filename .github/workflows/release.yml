@@ -1,0 +1,40 @@
+# Ao enviar uma tag "v1.2.3", compila o BatteryTray.exe e publica um Release com o .exe e o SHA-256.
+# O app instalado consulta o último Release para oferecer a atualização no menu.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Conferir versão do código
+        shell: pwsh
+        run: |
+          $tag = '${{ github.ref_name }}'.TrimStart('v')
+          $line = Select-String -Path BatteryTray.cs -Pattern 'public const string Version = "([^"]+)"'
+          $code = $line.Matches[0].Groups[1].Value
+          if ($code -ne $tag) { throw "A tag é v$tag, mas o código está na versão $code (Updater.Version)." }
+
+      - name: Compilar
+        shell: cmd
+        run: build.cmd
+
+      - name: Gerar SHA-256
+        shell: pwsh
+        run: |
+          $h = (Get-FileHash BatteryTray.exe -Algorithm SHA256).Hash.ToLower()
+          Set-Content -Path BatteryTray.exe.sha256 -Value "$h  BatteryTray.exe" -Encoding ascii -NoNewline
+
+      - name: Publicar Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create '${{ github.ref_name }}' BatteryTray.exe BatteryTray.exe.sha256 --title 'BatteryTray ${{ github.ref_name }}' --generate-notes
