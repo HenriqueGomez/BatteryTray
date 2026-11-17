@@ -1404,7 +1404,7 @@ namespace BatteryTray
         readonly Dictionary<string, Entry> entries = new Dictionary<string, Entry>();
         readonly int taskbarCreated;
         public readonly IntPtr Blank;
-        public Action LeftClick, RightClick, Recreated;
+        public Action LeftClick, RightClick, Recreated, NotificationClick;
 
         public TrayIcons()
         {
@@ -1552,6 +1552,7 @@ namespace BatteryTray
                 int ev = (int)((long)m.LParam & 0xFFFF);
                 if (ev == 0x202 && LeftClick != null) LeftClick();                       // WM_LBUTTONUP
                 else if ((ev == 0x205 || ev == 0x7B) && RightClick != null) RightClick(); // WM_RBUTTONUP / WM_CONTEXTMENU
+                else if (ev == 0x405 && NotificationClick != null) NotificationClick();   // NIN_BALLOONUSERCLICK
             }
             base.WndProc(ref m);
         }
@@ -1864,7 +1865,7 @@ namespace BatteryTray
     static class Updater
     {
         // Ao publicar uma versão nova, mude este número e crie a tag "v" + número (veja release.ps1).
-        public const string Version = "1.3.4";
+        public const string Version = "1.4.0";
         const string Repo = "HenriqueGomez/BatteryTray";
         const string Agent = "BatteryTray-Updater";
 
@@ -2260,8 +2261,45 @@ namespace BatteryTray
                     Interlocked.Exchange(ref updating, 0);
                     if (err == null) available = r;
                     SetUpdateStatus(!manual ? updateStatus : err != null ? "Falha ao verificar" : r == null ? "Já está atualizado" : null);
+                    if (!manual)
+                    {
+                        // ao ligar o PC a internet pode ainda não estar pronta: tenta de novo em 2 min; senão, daqui a 6 h
+                        if (err != null && autoRetries++ < 5) updateTimer.Change(2 * 60 * 1000, 6 * 3600 * 1000);
+                        else if (err == null) autoRetries = 0;
+                        if (r != null) NotifyUpdate(r);
+                    }
                 }, null);
             });
+        }
+
+        int autoRetries;
+
+        // Notificação de versão nova: uma vez por versão, e de novo a cada 3 dias enquanto não atualizar.
+        // Clicar nela abre o menu e já começa a baixar.
+        const string NotifiedValue = "AvisoAtualizacao";
+        void NotifyUpdate(Updater.Release r)
+        {
+            string key = Ordered().Select(x => x.Key).FirstOrDefault(x => IsVisible(x) && tray.Has(x)) ?? AppIconKey;
+            if (!tray.Has(key)) return; // nenhum ícone na bandeja ainda: avisa na próxima verificação
+            string now = r.Tag + "|" + DateTime.Today.ToString("yyyy-MM-dd");
+            using (var k = Registry.CurrentUser.CreateSubKey(@"Software\BatteryTray"))
+            {
+                var last = (k.GetValue(NotifiedValue) as string ?? "").Split('|');
+                DateTime when;
+                if (last.Length == 2 && last[0] == r.Tag && DateTime.TryParse(last[1], out when) && (DateTime.Today - when).TotalDays < 3) return;
+                k.SetValue(NotifiedValue, now);
+            }
+            pendingClick = "update";
+            tray.Notify(key, "BatteryTray " + r.Tag + " disponível", "Clique aqui para atualizar. O app baixa a versão nova e reabre sozinho.");
+        }
+
+        string pendingClick; // o que a última notificação faz ao ser clicada
+
+        void NotificationClicked()
+        {
+            string what = pendingClick; pendingClick = null;
+            if (what == "update" && available != null) { ShowMenu(); ApplyUpdate(); }
+            else ShowMenu();
         }
 
         void ApplyUpdate()
@@ -2340,6 +2378,7 @@ namespace BatteryTray
                     }
             tray.LeftClick = RefreshNow;
             tray.RightClick = ShowMenu;
+            tray.NotificationClick = NotificationClicked;
             tray.Recreated = () => { iconSig.Clear(); Layout(); };
             layoutTimer = new System.Windows.Forms.Timer { Interval = 2000 };
             layoutTimer.Tick += (s, e) => Layout();
@@ -2351,7 +2390,7 @@ namespace BatteryTray
             SystemEvents.UserPreferenceChanged += (s, e) => { foreach (var o in overlays.Values) o.Invalidate(); Layout(); };
             poll = new System.Threading.Timer(_ => Tick(), null, 0, 60000);
             // verifica atualizações 20 s depois de abrir e a cada 6 horas
-            updateTimer = new System.Threading.Timer(_ => ui.Post(__ => CheckUpdates(false), null), null, 20000, 6 * 3600 * 1000);
+            updateTimer = new System.Threading.Timer(_ => ui.Post(__ => CheckUpdates(false), null), null, 5000, 6 * 3600 * 1000);
         }
 
         public void RefreshNow() { ThreadPool.QueueUserWorkItem(_ => Tick()); }
@@ -2424,6 +2463,7 @@ namespace BatteryTray
                 int done;
                 if (level == 0 || (warnedAt.TryGetValue(r.Key, out done) && done <= level)) continue;
                 warnedAt[r.Key] = level;
+                pendingClick = null; // clicar no aviso de bateria só abre o menu
                 tray.Notify(r.Key, "Bateria baixa: " + r.Name,
                     (r.LevelText != null ? "Cerca de " : "") + r.Percent + "% restantes. " + (level == 5 ? "Coloque para carregar agora." : "Coloque para carregar em breve."));
             }

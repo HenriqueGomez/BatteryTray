@@ -34,7 +34,7 @@ O menu abre com o clique direito em qualquer aparelho, ou no ícone de bateria q
 - **Atualizar agora:** relê as baterias sem fechar o menu. Isso também acontece sozinho a cada minuto.
 - **Iniciar com o Windows.**
 - **Avisar bateria baixa:** mostra uma notificação do Windows quando um aparelho chega a 15% e outra em 5%. Depois de carregar, volta a avisar. Respeita o "Não incomodar". Vem ligado.
-- **Verificar atualizações:** mostra a versão instalada e, quando existir uma nova, vira **Atualizar para vX.Y.Z**. A atualização baixa o novo `.exe`, confere o SHA-256 publicado no Release, troca o arquivo e reabre o app.
+- **Verificar atualizações:** mostra a versão instalada e, quando existir uma nova, vira **Atualizar para vX.Y.Z**. O app também procura sozinho, ao abrir e a cada 6 horas, e avisa com uma notificação do Windows. Clicar na notificação já começa a atualização. A atualização baixa o novo `.exe`, confere o SHA-256 publicado no Release, troca o arquivo e reabre o app.
 - **Gerar diagnóstico:** cria o arquivo `BatteryTray-diagnostico-<data>.txt` na pasta do app e abre a pasta com ele selecionado. Leva alguns segundos. Veja [Um aparelho não aparece?](#um-aparelho-não-aparece)
 
 ## O que ele detecta
@@ -74,7 +74,7 @@ Se o app nem abrir, rode `BatteryTray.exe --diagnostico` no terminal, na pasta d
 - **Aparelhos:** lê a bateria conversando direto com receptores Logitech e Razer (somente comandos de leitura) e com as propriedades de dispositivos do Windows.
 - **Arquivos:** lê os logs do Razer Synapse em `%LOCALAPPDATA%\Razer\RazerAppEngine\User Data\Logs`. Só grava o arquivo de diagnóstico quando você pede, e ele não é enviado a lugar nenhum.
 - **Registro do Windows, só no seu usuário:**
-  - `HKCU\Software\BatteryTray` guarda os aparelhos ocultos, a identificação de cada ícone e se o aviso de bateria baixa está ligado;
+  - `HKCU\Software\BatteryTray` guarda os aparelhos ocultos, a identificação de cada ícone, se o aviso de bateria baixa está ligado e a última versão nova avisada;
   - `HKCU\...\CurrentVersion\Run` guarda o início com o Windows, se você ligar.
 
 ## Desinstalar

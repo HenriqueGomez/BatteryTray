@@ -12,6 +12,11 @@ Como usar (mantenedor):
 
 ## [Não publicado]
 
+## [1.4.0] - 2026-11-17
+
+### Novidades
+- **Aviso de versão nova:** o app procura atualização logo ao abrir e mostra uma notificação do Windows quando há uma versão nova. Clicando nela, o menu abre e a atualização começa. O aviso aparece uma vez por versão e se repete a cada 3 dias enquanto você não atualizar. Se a internet ainda não estiver pronta ao ligar o PC, o app tenta de novo depois de 2 minutos.
+
 ## [1.3.4] - 2026-11-17
 
 ### Correções
