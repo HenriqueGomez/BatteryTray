@@ -19,6 +19,8 @@ Como cada aparelho aparece na barra (prévia ampliada):
 1. Baixe o **`BatteryTray.exe`** da [versão mais recente](https://github.com/HenriqueGomez/BatteryTray/releases/latest).
 2. Coloque o arquivo numa pasta sua, por exemplo `%LOCALAPPDATA%\BatteryTray`. Evite `C:\Program Files`: o app se atualiza trocando o próprio `.exe` e precisa poder gravar na pasta onde está.
 3. Abra o `BatteryTray.exe`. O executável não é assinado digitalmente, então na primeira vez o Windows pode mostrar **"O Windows protegeu o computador"**. Clique em **Mais informações → Executar assim mesmo**. Se preferir, compile você mesmo a partir do código (veja [Compilar](#compilar)).
+
+   > **Bloqueado pelo Controle Inteligente de Aplicativos?** Esse recurso do Windows 11 bloqueia todo programa sem assinatura digital, e o BatteryTray ainda não tem uma. Ele não tem a opção "Executar assim mesmo" nem aceita exceção para um app só, e compilar você mesmo não muda isso. A única forma de usar o app é desligar o recurso em *Segurança do Windows → Controle de aplicativos e do navegador → Configurações do Controle Inteligente de Aplicativos*. Com o Windows atualizado (desde abril de 2026), dá para religar depois pelo mesmo lugar. Em versões anteriores, desligar era definitivo e só voltava reinstalando o Windows.
 4. Os aparelhos encontrados aparecem dentro da setinha **`^`** da bandeja. **Arraste cada um para a barra de tarefas** e o Windows passa a lembrar dessa posição.
 5. No menu (clique direito no ícone), ligue **Iniciar com o Windows**.
 
