@@ -82,7 +82,41 @@ namespace BatteryTray
         [DllImport("hid.dll")] static extern int HidP_GetUsageValue(int reportType, ushort usagePage, ushort link, ushort usage, out uint value, IntPtr preparsed, byte[] report, int len);
         const int HIDP_STATUS_SUCCESS = 0x00110000;
 
-        public class Info { public string Path; public ushort Vid, Pid, UsagePage, Usage, InLen, FeatLen; public string Product; }
+        public class Info { public string Path; public ushort Vid, Pid, UsagePage, Usage, InLen, OutLen, FeatLen; public string Product; }
+
+        // Envia um relatório de saída e espera, por até timeoutMs, um relatório de entrada aceito por "accept".
+        // (Para aparelhos que só conversam por relatórios de entrada/saída, sem "feature reports".)
+        public static byte[] Exchange(Info info, byte[] request, Func<byte[], bool> accept, int timeoutMs)
+        {
+            var h = CreateFile(info.Path, 0xC0000000, 3, IntPtr.Zero, 3, 0x40000000, IntPtr.Zero); // leitura/escrita, overlapped
+            bool readOnly = false;
+            if (h.IsInvalid && request == null) { h.Dispose(); h = CreateFile(info.Path, 0x80000000, 3, IntPtr.Zero, 3, 0x40000000, IntPtr.Zero); readOnly = true; }
+            if (h.IsInvalid) { h.Dispose(); return null; }
+            using (var fs = new FileStream(h, readOnly ? FileAccess.Read : FileAccess.ReadWrite, 1, true))
+            {
+                if (request != null) // null: só escuta (aparelhos que enviam a bateria sozinhos)
+                {
+                    int outLen = info.OutLen > 0 ? info.OutLen : request.Length;
+                    var req = new byte[outLen];
+                    Array.Copy(request, req, Math.Min(request.Length, outLen));
+                    try { fs.Write(req, 0, outLen); fs.Flush(); } catch (IOException) { return null; }
+                }
+                var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+                int inLen = Math.Max(1, (int)info.InLen);
+                while (true)
+                {
+                    int left = (int)(deadline - DateTime.UtcNow).TotalMilliseconds;
+                    if (left <= 0) return null;
+                    var buf = new byte[inLen];
+                    IAsyncResult ar;
+                    try { ar = fs.BeginRead(buf, 0, inLen, null, null); } catch (IOException) { return null; }
+                    if (!ar.AsyncWaitHandle.WaitOne(left)) return null; // fechar o arquivo cancela a leitura pendente
+                    int n;
+                    try { n = fs.EndRead(ar); } catch (IOException) { return null; }
+                    if (n > 0 && accept(buf)) return buf;
+                }
+            }
+        }
 
         // Leitura/escrita; se o Windows não deixar (teclados e mouses são exclusivos do sistema), abre só para consulta.
         public static SafeFileHandle Open(string path)
@@ -183,7 +217,7 @@ namespace BatteryTray
                     var pb = new byte[256]; string prod = null;
                     if (HidD_GetProductString(h, pb, pb.Length)) prod = Encoding.Unicode.GetString(pb).TrimEnd('\0');
                     res.Add(new Info { Path = path, Vid = a.VendorID, Pid = a.ProductID, UsagePage = c.UsagePage, Usage = c.Usage,
-                                       InLen = c.InputReportByteLength, FeatLen = c.FeatureReportByteLength, Product = prod });
+                                       InLen = c.InputReportByteLength, OutLen = c.OutputReportByteLength, FeatLen = c.FeatureReportByteLength, Product = prod });
                 }
             }
             SetupDiDestroyDeviceInfoList(set);
@@ -545,6 +579,7 @@ namespace BatteryTray
         {
             if (string.IsNullOrEmpty(name)) return DeviceKind.Other;
             string n = name.ToLowerInvariant();
+            if (Regex.IsMatch(n, @"\b(led|rgb|aura|lighting)\b.*controller")) return DeviceKind.Other; // controle de iluminação, não de jogo
             foreach (var w in Words)
                 if (w.Skip(1).Any(x => n.Contains(x))) return (DeviceKind)Enum.Parse(typeof(DeviceKind), w[0]);
             return DeviceKind.Other;
@@ -555,6 +590,11 @@ namespace BatteryTray
         // coleções de mouse ou joystick (teclas analógicas), e receptores de mouse, uma de teclado.
         public static DeviceKind FromHid(IEnumerable<Hid.Info> cols)
         {
+            // Receptor sem fio com uma interface só de mouse: é o receptor de um mouse, mesmo que a primeira
+            // interface seja de teclado (ex.: receptores "2.4G 8K" de mouses gamer)
+            bool receiver = cols.Any(c => c.Product != null && Regex.IsMatch(c.Product, "receiver|dongle", RegexOptions.IgnoreCase));
+            if (receiver && cols.Any(c => c.UsagePage == 1 && c.Usage == 2 && Regex.IsMatch(c.Path, "&mi_[0-9a-f]{2}#", RegexOptions.IgnoreCase)))
+                return DeviceKind.Mouse;
             foreach (var c in cols.Where(c => c.UsagePage == 1).OrderBy(c => c.Path, StringComparer.OrdinalIgnoreCase))
             {
                 if (c.Usage == 4 || c.Usage == 5) return DeviceKind.Controller;
@@ -667,10 +707,118 @@ namespace BatteryTray
         }
     }
 
+    // ------------------------------------------------------------------ Controles GameSir (ex.: Cyclone 2) pelo receptor 2.4 GHz
+    // Protocolo do GameSir Connect, documentado por projetos abertos (gamesir-reverse-engineering, cyclone2-linux):
+    // na coleção FFF0/0040, o "heartbeat" 0F F2 faz o controle enviar relatórios 0x12 por ~1 s;
+    // neles o byte 36 é a bateria (0-100) e o byte 35 vale 1 quando está no cabo/carregando.
+    // O XInput não serve: ele informa esses controles como "com fio".
+    class GameSirSource : IBatterySource
+    {
+        readonly Dictionary<string, Reading> last = new Dictionary<string, Reading>();
+
+        public List<Reading> Poll()
+        {
+            var seen = new HashSet<string>();
+            foreach (var info in Hid.Enumerate().Where(i => i.Vid == 0x3537 && i.UsagePage == 0xFFF0 && i.Usage == 0x0040))
+            {
+                // o PID muda com o modo (0x100B no XInput, 0x0575 com o controle desligado): a chave usa o nome
+                string name = string.IsNullOrEmpty(info.Product) ? "GameSir" : info.Product.Replace('-', ' ').Trim();
+                string key = "gamesir:" + name.ToLowerInvariant();
+                if (seen.Contains(key)) continue;
+                var frame = Hid.Exchange(info, new byte[] { 0x0F, 0xF2, 0x00 }, f => f.Length > 36 && f[0] == 0x12, 1500);
+                Diagnostics.Raw("GameSir 3537:" + info.Pid.ToString("X4") + " (FFF0/0040, heartbeat 0F F2; bytes 0-39)", frame, 40);
+                Reading r;
+                if (!last.TryGetValue(key, out r)) r = new Reading { Key = key, Kind = DeviceKind.Controller };
+                r.Name = name;
+                if (frame != null && frame[36] <= 100)
+                {
+                    r.Percent = frame[36]; r.Charging = frame[35] == 1 && frame[36] < 100;
+                    r.Online = true; r.Updated = DateTime.Now;
+                    last[key] = r; seen.Add(key);
+                }
+                else if (last.ContainsKey(key)) { r.Online = false; seen.Add(key); } // controle desligado
+            }
+            foreach (var r in last.Values) if (!seen.Contains(r.Key)) r.Online = false;
+            return last.Values.ToList();
+        }
+    }
+
+    // ------------------------------------------------------------------ Mouses com receptor Beken/CompX "2.4G 8K HS Receiver" (VID 1D57)
+    // Receptor genérico de vários mouses (AULA, Attack Shark, Delux, INPHIC...). Protocolo documentado por projetos
+    // abertos (AreYouLowBattery, BatteryMonitor): na coleção 000A/0000 (5 bytes), o mouse envia sozinho, a cada ~2 s,
+    // 03 <modelo> 40 <estado> <%>  ·  estado: 1 na bateria, 2 carregado (100%), 3 carregando (a % fica congelada).
+    class BekenMouseSource : IBatterySource
+    {
+        static readonly Dictionary<byte, string> Models = new Dictionary<byte, string> {
+            { 0x93, "INPHIC IN10" }, { 0x30, "Delux M900 Pro" }, { 0x55, "Attack Shark X11" }, { 0x85, "Attack Shark X6" }, { 0x10, "Attack Shark R1" } };
+        static readonly HashSet<byte> TenSteps = new HashSet<byte> { 0x85, 0x10 }; // informam 0-10
+        readonly Dictionary<string, Reading> last = new Dictionary<string, Reading>();
+
+        public List<Reading> Poll()
+        {
+            var seen = new HashSet<string>();
+            foreach (var info in Hid.Enumerate().Where(i => i.Vid == 0x1D57 && i.UsagePage == 0x000A && i.Usage == 0 && i.InLen == 5))
+            {
+                string key = "beken:" + info.Pid.ToString("X4");
+                if (seen.Contains(key)) continue;
+                seen.Add(key);
+                var f = Hid.Exchange(info, null, x => x.Length >= 5 && x[0] == 0x03 && (x[2] == 0x40 || x[2] == 0x41), 2500);
+                Reading r;
+                if (!last.TryGetValue(key, out r)) r = new Reading { Key = key, Kind = DeviceKind.Mouse, Name = "Mouse sem fio (2.4G)" };
+                Diagnostics.Raw("Receptor 1D57:" + info.Pid.ToString("X4") + " (000A/0000)", f, 5);
+                if (f == null) { r.Online = false; continue; } // nenhum quadro em 2,5 s: mouse dormindo ou desligado
+                string model;
+                if (Models.TryGetValue(f[1], out model)) r.Name = model;
+                int pct = TenSteps.Contains(f[1]) ? f[4] * 10 : f[4];
+                if (f[3] == 2) pct = 100;
+                if (pct >= 0 && pct <= 100 && !(f[3] == 3 && r.Percent >= 0)) r.Percent = pct; // carregando: mantém o último valor
+                r.Charging = f[3] == 3;
+                r.Online = true; r.Updated = DateTime.Now;
+                r.LevelText = null;
+                last[key] = r;
+            }
+            foreach (var r in last.Values) if (!seen.Contains(r.Key)) r.Online = false;
+            return last.Values.ToList();
+        }
+    }
+
+    // ------------------------------------------------------------------ Headsets MCHOSE (ex.: V9 Turbo+) pelo receptor 2.4 GHz
+    // Protocolo documentado por projetos abertos (HaloBattery, myfinder-device-battery), testado no V9 Turbo+:
+    // na coleção FF90/0001, o pedido 55 65 01 é respondido com 55 65 <%> <estado>  ·  estado 0x1A = headset desligado.
+    // Carregando no cabo o headset para de responder, e na base responde como se estivesse na bateria.
+    class MchoseHeadsetSource : IBatterySource
+    {
+        readonly Dictionary<string, Reading> last = new Dictionary<string, Reading>();
+
+        public List<Reading> Poll()
+        {
+            var seen = new HashSet<string>();
+            foreach (var info in Hid.Enumerate().Where(i => i.Vid == 0x3837 && i.UsagePage == 0xFF90 && i.Usage == 0x0001))
+            {
+                string key = "mchose:" + info.Pid.ToString("X4");
+                if (seen.Contains(key)) continue;
+                var f = Hid.Exchange(info, new byte[] { 0x55, 0x65, 0x01 }, x => x.Length >= 4 && x[0] == 0x55 && x[1] == 0x65, 1000);
+                Diagnostics.Raw("MCHOSE 3837:" + info.Pid.ToString("X4") + " (FF90/0001, pedido 55 65 01)", f, 8);
+                Reading r;
+                if (!last.TryGetValue(key, out r))
+                    r = new Reading { Key = key, Kind = DeviceKind.Headset, Name = string.IsNullOrEmpty(info.Product) ? "MCHOSE" : info.Product.Trim() };
+                bool ok = f != null && f[2] <= 100 && f[3] != 0x1A;
+                if (ok)
+                {
+                    r.Percent = f[2]; r.Charging = f[3] == 0x03; r.Online = true; r.Updated = DateTime.Now;
+                    last[key] = r; seen.Add(key);
+                }
+                else if (last.ContainsKey(key)) { r.Online = false; seen.Add(key); }
+            }
+            foreach (var r in last.Values) if (!seen.Contains(r.Key)) r.Online = false;
+            return last.Values.ToList();
+        }
+    }
+
     // ------------------------------------------------------------------ Qualquer marca: campo de bateria padrão HID
     class GenericHidSource : IBatterySource
     {
-        static readonly HashSet<ushort> HandledVendors = new HashSet<ushort> { 0x046D, 0x1532 }; // Logitech e Razer têm fontes próprias
+        static readonly HashSet<ushort> HandledVendors = new HashSet<ushort> { 0x046D, 0x1532, 0x3537, 0x1D57, 0x3837 }; // têm fontes próprias
         readonly Dictionary<string, Reading> last = new Dictionary<string, Reading>();
         readonly Dictionary<string, DateTime> skipUntil = new Dictionary<string, DateTime>();
 
@@ -1573,7 +1721,7 @@ namespace BatteryTray
     static class Updater
     {
         // Ao publicar uma versão nova, mude este número e crie a tag "v" + número (veja release.ps1).
-        public const string Version = "1.2.0";
+        public const string Version = "1.3.0";
         const string Repo = "HenriqueGomez/BatteryTray";
         const string Agent = "BatteryTray-Updater";
 
@@ -1674,6 +1822,20 @@ namespace BatteryTray
     // Não inclui números de série, endereços Bluetooth nem caminhos completos dos aparelhos.
     static class Diagnostics
     {
+        // Respostas brutas das fontes de protocolo próprio (só enquanto o diagnóstico roda), para conferir os protocolos.
+        static StringBuilder raw;
+        public static void Raw(string label, byte[] frame, int count)
+        {
+            var sb = raw;
+            if (sb == null) return;
+            lock (sb)
+            {
+                sb.Append(label).Append(": ");
+                if (frame == null) sb.AppendLine("sem resposta");
+                else { for (int i = 0; i < Math.Min(count, frame.Length); i++) sb.AppendFormat("{0:X2} ", frame[i]); sb.AppendLine(); }
+            }
+        }
+
         static readonly Dictionary<ushort, string> Vendors = new Dictionary<ushort, string> {
             { 0x046D, "Logitech" }, { 0x1532, "Razer" }, { 0x045E, "Microsoft" }, { 0x054C, "Sony" }, { 0x057E, "Nintendo" },
             { 0x2DC8, "8BitDo" }, { 0x1038, "SteelSeries" }, { 0x1B1C, "Corsair" }, { 0x0951, "HyperX" }, { 0x03F0, "HP/HyperX" },
@@ -1712,7 +1874,7 @@ namespace BatteryTray
         static string Source(string key)
         {
             string p = key == null ? "" : key.Split(':')[0];
-            switch (p) { case "logi": return "Logitech HID++"; case "razer": return "Razer Synapse"; case "razerhid": return "Razer USB"; case "win": return "Windows/Bluetooth"; case "hid": return "HID genérico"; case "xinput": return "XInput"; default: return p; }
+            switch (p) { case "logi": return "Logitech HID++"; case "razer": return "Razer Synapse"; case "razerhid": return "Razer USB"; case "win": return "Windows/Bluetooth"; case "hid": return "HID genérico"; case "gamesir": return "GameSir"; case "beken": return "Receptor 2.4G"; case "mchose": return "MCHOSE"; case "xinput": return "XInput"; default: return p; }
         }
 
         public static string Describe(Reading r)
@@ -1789,9 +1951,11 @@ namespace BatteryTray
             string hppLog = Path.Combine(Path.GetTempPath(), "BatteryTray-hpp-" + Guid.NewGuid().ToString("N") + ".log");
             string prevLog = HppChannel.DebugLog;
             HppChannel.DebugLog = hppLog;
+            var rawLog = new StringBuilder();
+            raw = rawLog;
             var sources = new Dictionary<string, IBatterySource> {
                 { "Logitech HID++", new LogitechSource() }, { "Razer Synapse 4 (logs)", new RazerLogSource() }, { "Razer USB (mouses/teclados)", new RazerHidSource() },
-                { "Windows/Bluetooth", new WindowsBatterySource() }, { "HID genérico", new GenericHidSource() }, { "XInput", new XInputSource() } };
+                { "Windows/Bluetooth", new WindowsBatterySource() }, { "GameSir", new GameSirSource() }, { "Receptor 2.4G (Beken/CompX)", new BekenMouseSource() }, { "MCHOSE", new MchoseHeadsetSource() }, { "HID genérico", new GenericHidSource() }, { "XInput", new XInputSource() } };
             try
             {
                 foreach (var kv in sources)
@@ -1806,7 +1970,7 @@ namespace BatteryTray
                     catch (Exception ex) { sb.AppendFormat("{0}: ERRO {1}: {2}", kv.Key, ex.GetType().Name, ex.Message).AppendLine(); }
                 }
             }
-            finally { HppChannel.DebugLog = prevLog; }
+            finally { HppChannel.DebugLog = prevLog; raw = null; }
 
             Section(sb, "3. Aparelhos USB/HID conectados");
             try
@@ -1873,7 +2037,10 @@ namespace BatteryTray
             }
             catch (Exception ex) { sb.AppendLine("Logs do Razer Synapse 4: erro " + ex.Message); }
 
-            Section(sb, "7. Detalhes técnicos: conversa HID++ com aparelhos Logitech");
+            Section(sb, "7. Detalhes técnicos: respostas de GameSir, MCHOSE e receptores 2.4G");
+            sb.Append(rawLog.Length == 0 ? "(nenhum desses aparelhos)" + Environment.NewLine : rawLog.ToString());
+
+            Section(sb, "8. Detalhes técnicos: conversa HID++ com aparelhos Logitech");
             try
             {
                 if (File.Exists(hppLog)) { string t = File.ReadAllText(hppLog); sb.Append(t.Length == 0 ? "(nenhuma)" + Environment.NewLine : t); File.Delete(hppLog); }
@@ -1907,7 +2074,7 @@ namespace BatteryTray
         const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
         const string AppName = "BatteryTray";
         static readonly DeviceKind[] Order = { DeviceKind.Headset, DeviceKind.Mouse, DeviceKind.Keyboard, DeviceKind.Controller, DeviceKind.Other };
-        readonly IBatterySource[] sources = { new LogitechSource(), new RazerLogSource(), new RazerHidSource(), new WindowsBatterySource(), new GenericHidSource(), new XInputSource() };
+        readonly IBatterySource[] sources = { new LogitechSource(), new RazerLogSource(), new RazerHidSource(), new WindowsBatterySource(), new GameSirSource(), new BekenMouseSource(), new MchoseHeadsetSource(), new GenericHidSource(), new XInputSource() };
         readonly Dictionary<string, Reading> state = new Dictionary<string, Reading>();
         readonly Dictionary<string, SlotOverlay> overlays = new Dictionary<string, SlotOverlay>();
         readonly Dictionary<string, string> iconSig = new Dictionary<string, string>();
@@ -2212,7 +2379,7 @@ namespace BatteryTray
             HppChannel.DebugLog = Path.Combine(outDir, "hpp.log");
             File.WriteAllText(HppChannel.DebugLog, "");
             var all = new List<Reading>();
-            foreach (var s in new IBatterySource[] { new LogitechSource(), new RazerLogSource(), new RazerHidSource(), new WindowsBatterySource(), new GenericHidSource(), new XInputSource() }) all.AddRange(s.Poll());
+            foreach (var s in new IBatterySource[] { new LogitechSource(), new RazerLogSource(), new RazerHidSource(), new WindowsBatterySource(), new GameSirSource(), new BekenMouseSource(), new MchoseHeadsetSource(), new GenericHidSource(), new XInputSource() }) all.AddRange(s.Poll());
             File.WriteAllLines(Path.Combine(outDir, "dump.txt"), all.Select(r => string.Format("{0} | {1} | {2}% | online={3} | charging={4} | {5}", r.Key, r.Name, r.Percent, r.Online, r.Charging, r.Updated)));
             all.Add(new Reading { Kind = DeviceKind.Mouse, Percent = 100, Online = true, Charging = true });
             all.Add(new Reading { Kind = DeviceKind.Headset, Percent = 45, Online = true, Charging = true });

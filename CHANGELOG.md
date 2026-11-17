@@ -12,6 +12,18 @@ Como usar (mantenedor):
 
 ## [Não publicado]
 
+## [1.3.0] - 2026-11-17
+
+### Novidades
+- Novos aparelhos suportados:
+  - **controles GameSir** pelo receptor 2.4 GHz (ex.: Cyclone 2), no modo XInput;
+  - **mouses com o receptor genérico "2.4G 8K HS Receiver"** (Beken/CompX), usado por AULA, Attack Shark, Delux, INPHIC e outras marcas;
+  - **headsets MCHOSE** pelo receptor 2.4 GHz (ex.: V9 Turbo+).
+- O diagnóstico mostra as respostas desses aparelhos, para conferir a leitura.
+
+### Correções
+- O controlador de LED da placa-mãe (ex.: ASUS AURA) aparecia como "controle" no diagnóstico, e receptores de mouse como "teclado".
+
 ## [1.2.0] - 2026-11-17
 
 ### Novidades

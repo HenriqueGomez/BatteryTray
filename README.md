@@ -43,6 +43,9 @@ O menu abre com o clique direito em qualquer aparelho, ou no ícone de bateria q
 | **Logitech** (receptores LIGHTSPEED, Unifying e Bolt, ou aparelho no cabo) | HID++ 2.0 direto no aparelho (features `0x1004`, `0x1000`, `0x1001` e `0x1F20`). Não precisa do G HUB. |
 | **Razer, headsets** (ex.: Kraken V3 Pro) | Eventos de bateria que o **Razer Synapse 4** grava nos logs dele. O Synapse precisa estar aberto. |
 | **Razer, mouses e teclados sem fio** | Relatório USB de 90 bytes, o mesmo protocolo documentado pelo projeto [openrazer](https://github.com/openrazer/openrazer). |
+| **Controles GameSir** (ex.: Cyclone 2, pelo receptor, no modo XInput) | Protocolo do GameSir Connect, documentado pelo projeto [gamesir-reverse-engineering](https://github.com/pedrosegato/gamesir-reverse-engineering). |
+| **Mouses com receptor "2.4G 8K HS Receiver"** (Beken/CompX: AULA, Attack Shark, Delux, INPHIC e outros) | O mouse envia a bateria sozinho ao receptor a cada ~2 s. Com o mouse dormindo, mostra o último valor. |
+| **Headsets MCHOSE** (ex.: V9 Turbo+, pelo receptor) | Pedido de bateria do receptor. Carregando no cabo, o headset para de responder e aparece apagado. |
 | **Bluetooth (qualquer marca)** | A bateria que o próprio Windows conhece, a mesma de *Configurações → Bluetooth e dispositivos*. |
 | **USB/HID genérico** | Campo de bateria padrão HID (`Battery Strength` ou `Remaining Capacity`). |
 | **Controles XInput** | Quando o controle informa a bateria. |
@@ -52,7 +55,7 @@ O menu abre com o clique direito em qualquer aparelho, ou no ícone de bateria q
 - controles cujo receptor se apresenta ao Windows como "com fio" (por exemplo, o dongle da 8BitDo);
 - aparelhos Logitech que só informam a tensão: nesse caso a porcentagem é uma **estimativa**.
 
-Só foi testado com um Logitech G502 X PLUS e um Razer Kraken V3 Pro. Outros aparelhos usam os mesmos protocolos, mas podem se comportar diferente.
+Só foi testado com um Logitech G502 X PLUS e um Razer Kraken V3 Pro. O suporte a GameSir, MCHOSE e aos receptores 2.4G foi feito a partir dos protocolos documentados por outros projetos e ainda não foi confirmado num aparelho. Outros aparelhos usam os mesmos protocolos, mas podem se comportar diferente.
 
 ### Um aparelho não aparece?
 
