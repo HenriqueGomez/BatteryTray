@@ -12,6 +12,18 @@ Como usar (mantenedor):
 
 ## [Não publicado]
 
+## [1.6.0] - 2026-11-19
+
+### Melhorias
+- **Atualização na hora ao ligar ou desligar aparelhos**, sem esperar a leitura de cada minuto:
+  - **Razer (headsets, pelo Synapse):** o app confere o log a cada 2 segundos.
+  - **Logitech:** o app escuta o receptor, que avisa quando o aparelho liga, desliga ou muda a bateria. Isso inclui começar a carregar num carregador de tomada.
+  - **Mouses com receptor "2.4G 8K HS Receiver":** o app escuta o mouse o tempo todo. Ele manda a bateria a cada ~2 s e, quando para de mandar, aparece desligado em poucos segundos.
+- Headsets MCHOSE e controles GameSir continuam sendo lidos a cada minuto, porque só respondem quando perguntados.
+
+### Correções
+- Headsets Razer às vezes não apareciam ligados, nem clicando em **Atualizar agora**. Enquanto o Synapse mantém o log aberto, o Windows não atualiza o tamanho do arquivo na listagem da pasta, e o app achava que não havia nada novo. Agora o tamanho é lido no próprio arquivo.
+
 ## [1.5.2] - 2026-11-19
 
 ### Melhorias

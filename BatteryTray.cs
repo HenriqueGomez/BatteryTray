@@ -265,6 +265,47 @@ namespace BatteryTray
         }
     }
 
+    // ------------------------------------------------------------------ Escuta contínua de uma coleção HID
+    // Cada relatório que o aparelho manda sozinho (bateria, ligou/desligou) chega em onReport, numa thread do sistema.
+    // Abre só para leitura: o app não manda nada por aqui.
+    class HidListener : IDisposable
+    {
+        public readonly string Path;
+        readonly FileStream fs;
+        readonly int len;
+        readonly Action<byte[]> onReport;
+        volatile bool closed;
+        public bool Alive { get { return !closed; } }
+
+        public HidListener(Hid.Info info, Action<byte[]> onReport)
+        {
+            Path = info.Path; this.onReport = onReport; len = Math.Max(1, (int)info.InLen);
+            var h = Hid.CreateFile(info.Path, 0x80000000, 3, IntPtr.Zero, 3, 0x40000000, IntPtr.Zero); // leitura, overlapped
+            if (h.IsInvalid) { h.Dispose(); h = Hid.CreateFile(info.Path, 0xC0000000, 3, IntPtr.Zero, 3, 0x40000000, IntPtr.Zero); }
+            if (h.IsInvalid) { h.Dispose(); throw new IOException("open failed"); }
+            fs = new FileStream(h, FileAccess.Read, 1, true);
+            BeginRead();
+        }
+
+        void BeginRead()
+        {
+            var buf = new byte[len];
+            try
+            {
+                fs.BeginRead(buf, 0, len, ar =>
+                {
+                    int n;
+                    try { n = fs.EndRead(ar); } catch { closed = true; return; } // aparelho removido ou escuta fechada
+                    if (n > 0) { try { onReport(buf); } catch { } }
+                    if (!closed) BeginRead();
+                }, null);
+            }
+            catch { closed = true; }
+        }
+
+        public void Dispose() { closed = true; try { fs.Dispose(); } catch { } }
+    }
+
     // ------------------------------------------------------------------ Logitech HID++
     class HppChannel : IDisposable
     {
@@ -329,7 +370,7 @@ namespace BatteryTray
         static string Hex(byte[] b) { var sb = new StringBuilder(); foreach (var x in b) sb.AppendFormat("{0:X2} ", x); return sb.ToString(); }
     }
 
-    class LogitechSource : IBatterySource
+    class LogitechSource : IBatterySource, IDisposable
     {
         class Known { public string Path; public byte Dev; public byte BattIdx; public ushort BattFeature; public string Name; public DeviceKind Kind; public Reading Last; }
         readonly Dictionary<string, Known> known = new Dictionary<string, Known>();
@@ -394,8 +435,47 @@ namespace BatteryTray
             }
             if (rescan) lastScan = DateTime.UtcNow;
             foreach (var k in known.Values.Where(k => !paths.Contains(k.Path))) k.Last.Online = false;
+            battIdx = new HashSet<int>(known.Values.Select(k => k.Dev << 8 | k.BattIdx));
+            Listen(all, collections);
             return Merge(known.Values.Select(k => k.Last));
         }
+
+        // Escuta os receptores: o aviso de "aparelho ligou/desligou" (HID++ 1.0, 0x41, no canal curto) e o aviso de
+        // bateria (evento da feature de bateria, no canal longo) disparam Changed, e o app relê na hora.
+        // Respostas a pedidos (do app ou do G HUB) têm "software id" diferente de zero e são ignoradas.
+        public event Action Changed;
+        volatile HashSet<int> battIdx = new HashSet<int>();
+        readonly Dictionary<string, HidListener> listeners = new Dictionary<string, HidListener>();
+
+        void Listen(List<Hid.Info> all, List<Hid.Info> collections)
+        {
+            var wanted = new Dictionary<string, Hid.Info>();
+            foreach (var col in collections)
+            {
+                wanted[col.Path] = col;
+                var sc = ShortCollection(all, col);
+                if (sc != null) wanted[sc.Path] = sc;
+            }
+            lock (listeners)
+            {
+                foreach (var p in listeners.Keys.ToList())
+                    if (!listeners[p].Alive || !wanted.ContainsKey(p)) { listeners[p].Dispose(); listeners.Remove(p); }
+                foreach (var kv in wanted)
+                {
+                    if (listeners.ContainsKey(kv.Key)) continue;
+                    try { listeners[kv.Key] = new HidListener(kv.Value, OnReport); } catch { }
+                }
+            }
+        }
+
+        void OnReport(byte[] r)
+        {
+            bool connection = r.Length >= 3 && r[0] == 0x10 && r[2] == 0x41;
+            bool battery = r.Length >= 4 && r[0] == 0x11 && (r[3] & 0x0F) == 0 && battIdx.Contains(r[1] << 8 | r[2]);
+            if ((connection || battery) && Changed != null) Changed();
+        }
+
+        public void Dispose() { lock (listeners) { foreach (var l in listeners.Values) l.Dispose(); listeners.Clear(); } }
 
         // O mesmo aparelho pode aparecer por dois caminhos: pelo receptor e pelo cabo (carregando).
         // Vira um item só, com a leitura de quem está ligado (o cabo, de preferência), sob a chave que o aparelho
@@ -596,6 +676,9 @@ namespace BatteryTray
         readonly Dictionary<string, long> offsets = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
         readonly string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), @"Razer\RazerAppEngine\User Data\Logs");
         readonly Dictionary<string, string> names = new Dictionary<string, string>();
+        DateTime checkedAt = DateTime.MinValue;
+        bool synapseCache;
+        HashSet<int> presentCache;
 
         public List<Reading> Poll()
         {
@@ -604,12 +687,20 @@ namespace BatteryTray
             var files = new DirectoryInfo(dir).GetFiles("lighting-engine*.log").OrderBy(f => f.LastWriteTimeUtc).ToList();
             foreach (var f in files) ReadNew(f);
 
-            bool synapse = System.Diagnostics.Process.GetProcessesByName("RazerAppEngine").Length > 0;
-            HashSet<int> present = null;
+            // o Synapse aberto e os aparelhos Razer ligados são conferidos a cada 15 s: esta fonte é lida a cada 2 s
+            // (para o headset aparecer ligado na hora) e essas duas consultas custam mais que ler o log
+            if ((DateTime.UtcNow - checkedAt).TotalSeconds >= 15 || presentCache == null)
+            {
+                var procs = System.Diagnostics.Process.GetProcessesByName("RazerAppEngine");
+                synapseCache = procs.Length > 0; foreach (var p in procs) p.Dispose();
+                presentCache = devs.Count == 0 ? new HashSet<int>() : new HashSet<int>(Hid.Enumerate().Where(i => i.Vid == 0x1532).Select(i => (int)i.Pid));
+                checkedAt = DateTime.UtcNow;
+            }
+            bool synapse = synapseCache;
+            HashSet<int> present = presentCache;
             foreach (var kv in devs)
             {
                 int pid = int.Parse(kv.Key);
-                if (present == null) present = new HashSet<int>(Hid.Enumerate().Where(i => i.Vid == 0x1532).Select(i => (int)i.Pid));
                 string name;
                 if (!names.TryGetValue(kv.Key, out name))
                 {
@@ -642,14 +733,17 @@ namespace BatteryTray
         {
             long off;
             offsets.TryGetValue(f.FullName, out off);
-            if (f.Length < off) off = 0; // arquivo rotacionado
-            if (f.Length == off) return;
             try
             {
                 using (var s = new FileStream(f.FullName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
                 {
+                    // o tamanho vem do arquivo aberto: o da listagem da pasta (FileInfo.Length) fica parado enquanto o
+                    // Synapse mantém o log aberto, e o app achava que não havia nada novo (o fone não aparecia ligado)
+                    long len = s.Length;
+                    if (len < off) off = 0; // arquivo rotacionado
+                    if (len == off) return;
                     s.Seek(off, SeekOrigin.Begin);
-                    var bytes = new byte[s.Length - off];
+                    var bytes = new byte[len - off];
                     int read = 0;
                     while (read < bytes.Length) { int n = s.Read(bytes, read, bytes.Length - read); if (n <= 0) break; read += n; }
                     int lastNl = Array.LastIndexOf(bytes, (byte)'\n', read - 1 < 0 ? 0 : read - 1);
@@ -874,7 +968,7 @@ namespace BatteryTray
     // Receptor genérico de vários mouses (AULA, Attack Shark, Delux, INPHIC...). Protocolo documentado por projetos
     // abertos (AreYouLowBattery, BatteryMonitor): na coleção 000A/0000 (5 bytes), o mouse envia sozinho, a cada ~2 s,
     // 03 <modelo> 40 <estado> <%>  ·  estado: 1 na bateria, 2 carregado (100%), 3 carregando (a % fica congelada).
-    class BekenMouseSource : IBatterySource
+    class BekenMouseSource : IBatterySource, IDisposable
     {
         // modelos confirmados por usuários do BatteryTray (nome completo, com a marca)
         static readonly Dictionary<byte, string> Confirmed = new Dictionary<byte, string> { { 0x50, "Delux M900 Pro" } };
@@ -888,35 +982,95 @@ namespace BatteryTray
             { 0x2C, "M2" }, { 0xBC, "M3" }, { 0x14, "MV6" }, { 0x87, "M740" }, { 0x30, "M90 Pro" }, { 0x3D, "M900 Mini" }, { 0x2B, "M800 Mini" },
             { 0x43, "G15" }, { 0x77, "G11" }, { 0xC9, "G9 Pro" }, { 0x6C, "G25" }, { 0x61, "G64" }, { 0x9A, "MC031" }, { 0x6D, "DVSE4" }, { 0xC3, "Vanguard" } };
         static readonly HashSet<byte> TenSteps = new HashSet<byte> { 0x85, 0x10 }; // informam 0-10
-        readonly Dictionary<string, Reading> last = new Dictionary<string, Reading>();
+        const int OfflineSeconds = 8; // sem quadros por esse tempo: mouse dormindo ou desligado
+
+        // O app escuta o receptor o tempo todo: cada quadro atualiza a leitura na hora (evento Changed),
+        // em vez de só na leitura de cada minuto.
+        readonly object sync = new object();
+        readonly Dictionary<string, Reading> last = new Dictionary<string, Reading>();         // por chave
+        readonly Dictionary<string, DateTime> lastFrame = new Dictionary<string, DateTime>();  // por chave
+        readonly Dictionary<string, byte[]> lastRaw = new Dictionary<string, byte[]>();       // por chave (diagnóstico)
+        readonly Dictionary<string, HidListener> listeners = new Dictionary<string, HidListener>(); // por caminho
+        public event Action Changed;
+
+        static string KeyOf(Hid.Info i) { return "beken:" + i.Pid.ToString("X4"); }
 
         public List<Reading> Poll()
         {
-            var seen = new HashSet<string>();
-            foreach (var info in Hid.Enumerate().Where(i => i.Vid == 0x1D57 && i.UsagePage == 0x000A && i.Usage == 0 && i.InLen == 5))
+            var infos = Hid.Enumerate().Where(i => i.Vid == 0x1D57 && i.UsagePage == 0x000A && i.Usage == 0 && i.InLen == 5).ToList();
+            var started = new List<string>();
+            lock (sync)
             {
-                string key = "beken:" + info.Pid.ToString("X4");
-                if (seen.Contains(key)) continue;
-                seen.Add(key);
-                var f = Hid.Exchange(info, null, x => x.Length >= 5 && x[0] == 0x03 && (x[2] == 0x40 || x[2] == 0x41), 2500);
-                Reading r;
-                if (!last.TryGetValue(key, out r)) r = new Reading { Key = key, Kind = DeviceKind.Mouse, Name = "Mouse sem fio (2.4G)" };
-                Diagnostics.Raw("Receptor 1D57:" + info.Pid.ToString("X4") + " (000A/0000)", f, 5);
-                if (f == null) { r.Online = false; continue; } // nenhum quadro em 2,5 s: mouse dormindo ou desligado
+                foreach (var p in listeners.Keys.ToList()) // receptor removido ou escuta que caiu
+                    if (!listeners[p].Alive || !infos.Any(i => i.Path == p)) { listeners[p].Dispose(); listeners.Remove(p); }
+                foreach (var info in infos)
+                {
+                    if (listeners.ContainsKey(info.Path)) continue;
+                    string key = KeyOf(info);
+                    try { listeners[info.Path] = new HidListener(info, f => OnFrame(key, f)); started.Add(key); } catch { }
+                }
+            }
+            // receptor novo: espera o primeiro quadro (o mouse manda a cada ~2 s)
+            var deadline = DateTime.UtcNow.AddMilliseconds(2500);
+            while (started.Count > 0 && DateTime.UtcNow < deadline)
+            {
+                lock (sync) if (started.All(k => lastFrame.ContainsKey(k))) break;
+                Thread.Sleep(50);
+            }
+            foreach (var info in infos)
+            {
+                byte[] raw; lock (sync) lastRaw.TryGetValue(KeyOf(info), out raw);
+                Diagnostics.Raw("Receptor 1D57:" + info.Pid.ToString("X4") + " (000A/0000, escuta contínua)", raw, 5);
+            }
+            Expire();
+            return Snapshot();
+        }
+
+        public List<Reading> Snapshot() { lock (sync) return last.Values.ToList(); }
+
+        void OnFrame(string key, byte[] f)
+        {
+            if (f.Length < 5 || f[0] != 0x03 || (f[2] != 0x40 && f[2] != 0x41)) return;
+            bool changed;
+            lock (sync)
+            {
+                lastFrame[key] = DateTime.UtcNow; lastRaw[key] = f;
+                Reading old; last.TryGetValue(key, out old);
+                var r = new Reading { Key = key, Kind = DeviceKind.Mouse, Name = old != null ? old.Name : "Mouse sem fio (2.4G)", Percent = old != null ? old.Percent : -1 };
                 string model;
                 if (Confirmed.TryGetValue(f[1], out model)) r.Name = model;
                 else if (Models.TryGetValue(f[1], out model)) r.Name = "Mouse " + model;
                 int pct = TenSteps.Contains(f[1]) ? f[4] * 10 : f[4];
                 if (f[3] == 2) pct = 100;
-                if (pct >= 0 && pct <= 100 && !(f[3] == 3 && r.Percent >= 0)) r.Percent = pct; // carregando: mantém o último valor
+                if (pct >= 0 && pct <= 100 && !(f[3] == 3 && r.Percent >= 0)) r.Percent = pct; // carregando: a % fica congelada, mantém a última
                 r.Charging = f[3] == 3;
                 r.Online = true; r.Updated = DateTime.Now;
-                r.LevelText = null;
+                changed = old == null || !old.Online || old.Percent != r.Percent || old.Charging != r.Charging || old.Name != r.Name;
                 last[key] = r;
             }
-            foreach (var r in last.Values) if (!seen.Contains(r.Key)) r.Online = false;
-            return last.Values.ToList();
+            if (changed && Changed != null) Changed();
         }
+
+        // Mouse que parou de mandar quadros fica apagado. Devolve true se algum mudou.
+        public bool Expire()
+        {
+            bool changed = false;
+            lock (sync)
+                foreach (var key in last.Keys.ToList())
+                {
+                    var r = last[key]; DateTime t;
+                    bool alive = lastFrame.TryGetValue(key, out t) && (DateTime.UtcNow - t).TotalSeconds < OfflineSeconds;
+                    if (r.Online && !alive)
+                    {
+                        last[key] = new Reading { Key = r.Key, Kind = r.Kind, Name = r.Name, Percent = r.Percent, Charging = false, Online = false, Updated = r.Updated };
+                        changed = true;
+                    }
+                }
+            if (changed && Changed != null) Changed();
+            return changed;
+        }
+
+        public void Dispose() { lock (sync) { foreach (var l in listeners.Values) l.Dispose(); listeners.Clear(); } }
     }
 
     // ------------------------------------------------------------------ Headsets MCHOSE (ex.: V9 Turbo+) pelo receptor 2.4 GHz
@@ -2547,7 +2701,7 @@ namespace BatteryTray
     static class Updater
     {
         // Ao publicar uma versão nova, mude este número e crie a tag "v" + número (veja release.ps1).
-        public const string Version = "1.5.2";
+        public const string Version = "1.6.0";
         const string Repo = "HenriqueGomez/BatteryTray";
         const string Agent = "BatteryTray-Updater";
 
@@ -2796,7 +2950,11 @@ namespace BatteryTray
                     catch (Exception ex) { sb.AppendFormat("{0}: ERRO {1}: {2}", kv.Key, ex.GetType().Name, ex.Message).AppendLine(); }
                 }
             }
-            finally { HppChannel.DebugLog = prevLog; raw = null; }
+            finally
+            {
+                HppChannel.DebugLog = prevLog; raw = null;
+                foreach (var src in sources.Values.OfType<IDisposable>()) src.Dispose(); // fecha as escutas abertas pelo diagnóstico
+            }
 
             Section(sb, "3. Aparelhos USB/HID conectados");
             try
@@ -2900,7 +3058,30 @@ namespace BatteryTray
         const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
         const string AppName = "BatteryTray";
         static readonly DeviceKind[] Order = { DeviceKind.Headset, DeviceKind.Mouse, DeviceKind.Keyboard, DeviceKind.Controller, DeviceKind.Other };
-        readonly IBatterySource[] sources = { new LogitechSource(), new RazerLogSource(), new RazerHidSource(), new WindowsBatterySource(), new GameSirSource(), new BekenMouseSource(), new MchoseHeadsetSource(), new GenericHidSource(), new XInputSource() };
+        // fontes que avisam na hora (escuta contínua ou verificação a cada 2 s) ficam em campos próprios
+        readonly LogitechSource logi = new LogitechSource();
+        readonly RazerLogSource razer = new RazerLogSource();
+        readonly BekenMouseSource beken = new BekenMouseSource();
+        readonly IBatterySource[] sources;
+        System.Threading.Timer fastTimer;
+        int fastBusy;
+        string razerSig;
+
+        // A cada 2 s: o final do log do Razer Synapse (headset ligou/desligou, bateria) e o mouse 2.4G que parou de mandar quadros.
+        void FastTick()
+        {
+            if (Interlocked.Exchange(ref fastBusy, 1) == 1) return;
+            try
+            {
+                List<Reading> rz;
+                lock (razer) rz = razer.Poll();
+                string sig = string.Join(";", rz.Select(r => r.Key + r.Percent + r.Online + r.Charging));
+                if (sig != razerSig) { bool first = razerSig == null; razerSig = sig; if (!first) ui.Post(_ => Apply(rz), null); }
+                beken.Expire();
+            }
+            catch { }
+            finally { Interlocked.Exchange(ref fastBusy, 0); }
+        }
         readonly Dictionary<string, Reading> state = new Dictionary<string, Reading>();
         readonly Dictionary<string, SlotOverlay> overlays = new Dictionary<string, SlotOverlay>();
         readonly Dictionary<string, string> iconSig = new Dictionary<string, string>();
@@ -3075,6 +3256,10 @@ namespace BatteryTray
             tray.RightClick = ShowMenu;
             tray.NotificationClick = NotificationClicked;
             tray.DevicesChanged = OnDevicesChanged;
+            sources = new IBatterySource[] { logi, razer, new RazerHidSource(), new WindowsBatterySource(), new GameSirSource(), beken, new MchoseHeadsetSource(), new GenericHidSource(), new XInputSource() };
+            logi.Changed += () => ui.Post(_ => OnDevicesChanged(), null);          // receptor avisou: relê tudo (junta avisos seguidos)
+            beken.Changed += () => ui.Post(_ => Apply(beken.Snapshot()), null);   // quadro novo do mouse 2.4G: atualiza na hora
+            fastTimer = new System.Threading.Timer(_ => FastTick(), null, 3000, 2000);
             tray.Recreated = () => { iconSig.Clear(); Layout(); };
             layoutTimer = new System.Windows.Forms.Timer { Interval = 2000 };
             layoutTimer.Tick += (s, e) => Layout();
@@ -3140,7 +3325,7 @@ namespace BatteryTray
             try
             {
                 var all = new List<Reading>();
-                foreach (var s in sources) { try { all.AddRange(s.Poll()); } catch { } }
+                foreach (var s in sources) { try { lock (s) all.AddRange(s.Poll()); } catch { } }
                 ui.Post(_ => Apply(all), null);
             }
             finally { Interlocked.Exchange(ref busy, 0); }
@@ -3363,7 +3548,9 @@ namespace BatteryTray
         protected override void ExitThreadCore()
         {
             poll.Dispose(); layoutTimer.Stop(); watchTimer.Stop();
-            if (deviceTimer != null) { deviceTimer.Stop(); deviceLaterTimer.Stop(); } if (updateTimer != null) updateTimer.Dispose();
+            if (deviceTimer != null) { deviceTimer.Stop(); deviceLaterTimer.Stop(); }
+            if (fastTimer != null) fastTimer.Dispose();
+            logi.Dispose(); beken.Dispose(); if (updateTimer != null) updateTimer.Dispose();
             foreach (var o in overlays.Values) o.Dispose();
             panel.Dispose();
             if (appearanceForm != null && !appearanceForm.IsDisposed) appearanceForm.Dispose();

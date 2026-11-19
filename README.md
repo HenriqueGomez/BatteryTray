@@ -32,7 +32,7 @@ O menu abre com o clique direito no painel (ou em qualquer aparelho, no modo de 
 
 - **Dispositivos na barra:** escolha quais aparelhos aparecem. Os interruptores não fecham o menu.
 - **Personalizar...:** abre uma janela com prévia ao vivo. Nela você escolhe o estilo (painel ou um ícone por aparelho na bandeja), liga ou desliga a barra, o `%` e os nomes curtos, troca o tamanho (o **Compacto** mostra só o ícone e a bateria) e, para cada aparelho, a cor, o nome curto e a ordem.
-- **Atualizar agora:** relê as baterias sem fechar o menu. Isso também acontece sozinho a cada minuto.
+- **Atualizar agora:** relê as baterias sem fechar o menu. Isso também acontece sozinho a cada minuto, e na hora quando um aparelho é plugado ou desplugado, ou quando um aparelho Logitech, Razer ou de receptor "2.4G 8K" liga, desliga ou muda a bateria.
 - **Iniciar com o Windows.**
 - **Avisar bateria baixa:** mostra uma notificação do Windows quando um aparelho chega a 15% e outra em 5%. Depois de carregar, volta a avisar. Respeita o "Não incomodar". Vem ligado.
 - **Verificar atualizações:** mostra a versão instalada e, quando existir uma nova, vira **Atualizar para vX.Y.Z**. O app também procura sozinho, ao abrir e a cada 6 horas, e avisa com uma notificação do Windows. Clicar na notificação já começa a atualização. A atualização baixa o novo `.exe`, confere o SHA-256 publicado no Release, troca o arquivo e reabre o app.
