@@ -1286,6 +1286,19 @@ namespace BatteryTray
 
         public static IntPtr Taskbar() { return FindWindow("Shell_TrayWnd", null); }
 
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string c, string n);
+        [StructLayout(LayoutKind.Sequential)] public struct TRACKMOUSEEVENT { public int cbSize, dwFlags; public IntPtr hwndTrack; public int dwHoverTime; }
+        [DllImport("user32.dll")] public static extern bool TrackMouseEvent(ref TRACKMOUSEEVENT t);
+
+        // Retângulo (tela) de uma janela interna da barra: "TrayNotifyWnd" (bandeja + relógio) ou "ReBarWindow32" (apps abertos).
+        public static Rectangle TaskbarPart(string cls)
+        {
+            IntPtr tb = Taskbar(), h = tb == IntPtr.Zero ? IntPtr.Zero : FindWindowEx(tb, IntPtr.Zero, cls, null);
+            RECT r;
+            if (h == IntPtr.Zero || !GetWindowRect(h, out r)) return Rectangle.Empty;
+            return Rectangle.FromLTRB(r.L, r.T, r.R, r.B);
+        }
+
         public static Rectangle TaskbarRect()
         {
             RECT r;
@@ -1374,6 +1387,579 @@ namespace BatteryTray
         }
 
         public void Dispose() { if (Handle != IntPtr.Zero) DestroyHandle(); }
+    }
+
+    // ------------------------------------------------------------------ Aparência: modo, opções do painel e cor/nome curto/ordem de cada aparelho
+    class Appearance
+    {
+        const string KeyPath = @"Software\BatteryTray\Aparencia";
+        public bool Panel = true;                 // painel na barra (padrão) ou um ícone de bandeja por aparelho
+        public bool ShowBar = true, ShowPercent = true, ShowLabels = true;
+        public int Size = 1;                      // 0 compacto, 1 normal, 2 grande
+        public readonly Dictionary<string, int> Colors = new Dictionary<string, int>();     // ARGB escolhido pelo usuário
+        public readonly Dictionary<string, string> Labels = new Dictionary<string, string>(); // nome curto (ex.: "600")
+        public readonly List<string> Order = new List<string>();
+
+        public static Color DefaultColor(DeviceKind k)
+        {
+            switch (k)
+            {
+                case DeviceKind.Headset: return Color.FromArgb(255, 92, 40);
+                case DeviceKind.Mouse: return Color.FromArgb(40, 170, 255);
+                case DeviceKind.Keyboard: return Color.FromArgb(60, 200, 120);
+                case DeviceKind.Controller: return Color.FromArgb(80, 120, 255);
+                default: return Color.FromArgb(170, 170, 170);
+            }
+        }
+
+        public Color ColorOf(Reading r) { int c; return Colors.TryGetValue(r.Key, out c) ? Color.FromArgb(c) : DefaultColor(r.Kind); }
+        public string LabelOf(string key) { string s; return Labels.TryGetValue(key, out s) ? s : ""; }
+        public int OrderOf(string key) { int i = Order.IndexOf(key); return i < 0 ? int.MaxValue : i; }
+
+        public static Appearance Load()
+        {
+            var a = new Appearance();
+            try
+            {
+                using (var k = Registry.CurrentUser.OpenSubKey(KeyPath))
+                {
+                    if (k == null) return a;
+                    a.Panel = (k.GetValue("Modo") as string ?? "painel") != "icones";
+                    a.ShowBar = Flag(k, "Barra", true); a.ShowPercent = Flag(k, "Porcentagem", true); a.ShowLabels = Flag(k, "NomesCurtos", true);
+                    object sz = k.GetValue("Tamanho"); if (sz is int) a.Size = Math.Max(0, Math.Min(2, (int)sz));
+                    var ord = k.GetValue("Ordem") as string[]; if (ord != null) a.Order.AddRange(ord);
+                    foreach (var n in k.GetValueNames())
+                    {
+                        if (n.StartsWith("Cor:") && k.GetValue(n) is int) a.Colors[n.Substring(4)] = (int)k.GetValue(n);
+                        else if (n.StartsWith("Nome:")) a.Labels[n.Substring(5)] = k.GetValue(n) as string ?? "";
+                    }
+                }
+            }
+            catch { }
+            return a;
+        }
+
+        static bool Flag(RegistryKey k, string name, bool def) { object v = k.GetValue(name); return v is int ? (int)v != 0 : def; }
+
+        public void Save()
+        {
+            try
+            {
+                Registry.CurrentUser.DeleteSubKeyTree(KeyPath, false);
+                using (var k = Registry.CurrentUser.CreateSubKey(KeyPath))
+                {
+                    k.SetValue("Modo", Panel ? "painel" : "icones");
+                    k.SetValue("Barra", ShowBar ? 1 : 0, RegistryValueKind.DWord);
+                    k.SetValue("Porcentagem", ShowPercent ? 1 : 0, RegistryValueKind.DWord);
+                    k.SetValue("NomesCurtos", ShowLabels ? 1 : 0, RegistryValueKind.DWord);
+                    k.SetValue("Tamanho", Size, RegistryValueKind.DWord);
+                    k.SetValue("Ordem", Order.ToArray(), RegistryValueKind.MultiString);
+                    foreach (var kv in Colors) k.SetValue("Cor:" + kv.Key, kv.Value, RegistryValueKind.DWord);
+                    foreach (var kv in Labels) if (kv.Value != "") k.SetValue("Nome:" + kv.Key, kv.Value);
+                }
+            }
+            catch { }
+        }
+    }
+
+    // ------------------------------------------------------------------ Desenho do painel: ícone colorido, % ao lado e barra de bateria embaixo
+    static class PanelRenderer
+    {
+        public class Item { public Reading R; public Color Color; public string Label; public int X, W; }
+
+        static readonly float[] IconPx = { 17, 20, 24 }, TextPx = { 13, 15.5f, 18.5f };
+        const string IconFont = "Segoe Fluent Icons";
+
+        static Font Make(string family, float px, FontStyle style, string fallback)
+        {
+            var f = new Font(family, px, style, GraphicsUnit.Pixel);
+            if (f.Name != family) { f.Dispose(); f = new Font(fallback, px, style, GraphicsUnit.Pixel); }
+            return f;
+        }
+
+        // Posiciona os itens (X, W) e devolve a largura total. A coluna de texto tem sempre a largura de "100%",
+        // para o painel não mudar de tamanho quando a porcentagem muda.
+        public static int Layout(List<Item> items, Appearance a, float s)
+        {
+            using (var bmp = new Bitmap(1, 1))
+            using (var g = Graphics.FromImage(bmp))
+            using (var tf = Make("Segoe UI Variable Display", TextPx[a.Size] * s, FontStyle.Bold, "Segoe UI"))
+            using (var fmt = (StringFormat)StringFormat.GenericTypographic.Clone())
+            {
+                float col = g.MeasureString(a.ShowPercent ? "100%" : "100", tf, 1000, fmt).Width;
+                int x = 0;
+                foreach (var it in items)
+                {
+                    it.X = x;
+                    it.W = (int)Math.Ceiling((6 + IconPx[a.Size] + 5) * s + col + 8 * s);
+                    x += it.W;
+                }
+                return x;
+            }
+        }
+
+        public static Bitmap Render(List<Item> items, Appearance a, float s, int w, int h, bool light, int hover)
+        {
+            var bmp = new Bitmap(Math.Max(1, w), Math.Max(1, h), PixelFormat.Format32bppArgb);
+            using (var g = Graphics.FromImage(bmp))
+            using (var fmt = (StringFormat)StringFormat.GenericTypographic.Clone())
+            using (var gf = Make(IconFont, IconPx[a.Size] * s, FontStyle.Regular, "Segoe MDL2 Assets"))
+            using (var tf = Make("Segoe UI Variable Display", TextPx[a.Size] * s, FontStyle.Bold, "Segoe UI"))
+            using (var bf = Make(IconFont, TextPx[a.Size] * 0.8f * s, FontStyle.Regular, "Segoe MDL2 Assets"))
+            using (var lf = Make("Segoe UI", 8.5f * s, FontStyle.Bold, "Arial"))
+            {
+                g.Clear(Color.FromArgb(1, 0, 0, 0)); // quase transparente: o painel recebe o mouse
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.TextRenderingHint = TextRenderingHint.AntiAlias;
+                fmt.FormatFlags |= StringFormatFlags.MeasureTrailingSpaces;
+                Color fg = light ? Color.FromArgb(26, 26, 26) : Color.White;
+                Color low = light ? Color.FromArgb(196, 43, 28) : Color.FromArgb(255, 95, 95);
+
+                // destaque ao passar o mouse: um só para o grupo todo, como o do relógio
+                if (hover >= 0)
+                    using (var b = new SolidBrush(Color.FromArgb(light ? 18 : 22, fg)))
+                    using (var p = RoundRect(new RectangleF(1 * s, 4 * s, w - 2 * s, h - 8 * s), 5 * s))
+                        g.FillPath(b, p);
+
+                float textH = tf.GetHeight(g) * 0.78f, barH = a.ShowBar ? 3 * s : 0, barGap = a.ShowBar ? 4 * s : 0;
+                foreach (var it in items)
+                {
+                    var r = it.R;
+                    bool isLow = r.Online && r.Percent >= 0 && r.Percent <= 15 && !r.Charging;
+                    Color dev = !r.Online ? Color.FromArgb(120, 140, 140, 140) : isLow ? low : it.Color;
+                    Color text = !r.Online ? Color.FromArgb(120, fg) : isLow ? low : fg;
+
+                    // ícone do aparelho, na cor dele
+                    string glyph = SlotRenderer.Glyph(r.Kind);
+                    var gs = g.MeasureString(glyph, gf, 1000, fmt);
+                    float ix = it.X + 6 * s, iy = (h - gs.Height) / 2f;
+                    using (var b = new SolidBrush(dev)) g.DrawString(glyph, gf, b, ix, iy, fmt);
+
+                    // nome curto (ex.: "600") no canto de baixo do ícone, com contorno para ler sobre o desenho
+                    if (a.ShowLabels && !string.IsNullOrEmpty(it.Label))
+                        using (var path = new GraphicsPath())
+                        {
+                            path.AddString(it.Label, lf.FontFamily, (int)FontStyle.Bold, lf.Size, PointF.Empty, fmt);
+                            var lb = path.GetBounds();
+                            using (var m = new Matrix()) { m.Translate(ix - 2 * s - lb.X, iy + gs.Height - lb.Height - 1 * s - lb.Y); path.Transform(m); }
+                            using (var pen = new Pen(light ? Color.FromArgb(240, 240, 240) : Color.FromArgb(20, 20, 20), 2.5f * s) { LineJoin = LineJoin.Round })
+                                g.DrawPath(pen, path);
+                            using (var b = new SolidBrush(text)) g.FillPath(b, path);
+                        }
+
+                    // porcentagem (ou raio, carregando) e a barra embaixo
+                    float tx = ix + IconPx[a.Size] * s + 5 * s;
+                    float col = it.X + it.W - 8 * s - tx;
+                    float blockH = textH + barGap + barH, ty = (h - blockH) / 2f - tf.GetHeight(g) * 0.11f;
+                    string num = SlotRenderer.Number(r);
+                    bool bolt = SlotRenderer.ShowBolt(r);
+                    using (var b = new SolidBrush(text))
+                    {
+                        string t = bolt || !a.ShowPercent ? num : num + "%";
+                        g.DrawString(t, tf, b, tx, ty, fmt);
+                        if (bolt)
+                        {
+                            float tw = g.MeasureString(t, tf, 1000, fmt).Width;
+                            using (var cb = new SolidBrush(dev)) g.DrawString(SlotRenderer.Bolt, bf, cb, tx + tw + 1 * s, ty + TextPx[a.Size] * 0.22f * s, fmt);
+                        }
+                    }
+                    if (a.ShowBar)
+                    {
+                        float by = (h - blockH) / 2f + textH + barGap;
+                        using (var track = new SolidBrush(Color.FromArgb(light ? 40 : 55, fg))) g.FillRectangle(track, tx, by, col, barH);
+                        float pct = r.Percent < 0 ? 0 : Math.Min(100, r.Percent) / 100f;
+                        using (var fill = new SolidBrush(dev)) g.FillRectangle(fill, tx, by, col * pct, barH);
+                    }
+                }
+            }
+            return bmp;
+        }
+
+        public static GraphicsPath RoundRect(RectangleF r, float rad)
+        {
+            var p = new GraphicsPath(); float d = rad * 2;
+            p.AddArc(r.X, r.Y, d, d, 180, 90); p.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+            p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90); p.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+            p.CloseFigure(); return p;
+        }
+    }
+
+    // ------------------------------------------------------------------ Painel dentro da barra de tarefas, à esquerda da bandeja
+    // Janela filha da barra (como a do TrafficMonitor). Diferente do desenho sobre os ícones da bandeja,
+    // o painel recebe o mouse: destaque, dica, clique (atualiza) e clique direito (menu) são do próprio app.
+    class PanelWindow : NativeWindow, IDisposable
+    {
+        IntPtr taskbar;
+        string lastSig;
+        List<PanelRenderer.Item> items = new List<PanelRenderer.Item>();
+        Appearance look;
+        float scale = 1;
+        int hover = -1;
+        bool tracking;
+        readonly TipWindow tip = new TipWindow();
+        public Action LeftClick, RightClick;
+
+        void EnsureAttached()
+        {
+            IntPtr tb = Native.Taskbar();
+            if (tb == IntPtr.Zero) return;
+            if (tb == taskbar && Handle != IntPtr.Zero && Native.IsWindow(Handle)) return;
+            if (Handle != IntPtr.Zero) { try { DestroyHandle(); } catch { } }
+            taskbar = tb; lastSig = null;
+            CreateHandle(new CreateParams
+            {
+                Caption = "BatteryTrayPanel",
+                Parent = tb,
+                Style = unchecked((int)(0x40000000 | 0x04000000)),  // WS_CHILD | WS_CLIPSIBLINGS
+                ExStyle = 0x00080000 | 0x08000000 | 0x80,          // WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW
+                Width = 1, Height = 1
+            });
+        }
+
+        public bool Visible { get; private set; }
+
+        // Mostra os itens encostados à esquerda da bandeja. Devolve false (e esconde) se não houver espaço
+        // entre os apps abertos e a bandeja.
+        public bool Show(List<PanelRenderer.Item> list, Appearance a)
+        {
+            EnsureAttached();
+            if (Handle == IntPtr.Zero) return false;
+            items = list; look = a; scale = Native.Scale();
+            Rectangle tray = Native.TaskbarPart("TrayNotifyWnd"), apps = Native.TaskbarPart("ReBarWindow32");
+            Native.RECT wr, cr;
+            Native.GetWindowRect(taskbar, out wr);
+            Native.GetClientRect(taskbar, out cr);
+            int h = cr.B - cr.T;
+            int w = PanelRenderer.Layout(items, a, scale);
+            int x = tray.IsEmpty ? -1 : tray.Left - wr.L - (int)(4 * scale) - w;
+            bool fits = items.Count > 0 && x >= 0 && (apps.IsEmpty || x >= apps.Right - wr.L + (int)(12 * scale));
+            if (!fits) { Hide(); return false; }
+            bool light = SlotRenderer.LightTheme();
+            string sig = string.Join("|", x, w, h, scale, light, hover, a.ShowBar, a.ShowPercent, a.ShowLabels, a.Size,
+                string.Join(";", items.Select(i => i.R.Key + i.R.Percent + i.R.Online + i.R.Charging + i.R.Kind + i.Color.ToArgb() + i.Label)));
+            if (sig == lastSig && Visible) return true;
+            lastSig = sig;
+            using (var bmp = PanelRenderer.Render(items, a, scale, w, h, light, hover))
+            {
+                Native.SetWindowPos(Handle, IntPtr.Zero /*HWND_TOP*/, x, 0, w, h, 0x0010 | 0x0040); // NOACTIVATE | SHOWWINDOW
+                Blit(bmp);
+            }
+            Visible = true;
+            return true;
+        }
+
+        public void Hide()
+        {
+            if (Handle != IntPtr.Zero && Visible) Native.ShowWindow(Handle, 0);
+            Visible = false; lastSig = null; tip.Hide();
+        }
+
+        public void Invalidate() { lastSig = null; }
+
+        void Blit(Bitmap bmp)
+        {
+            IntPtr screen = Native.GetDC(IntPtr.Zero), mem = Native.CreateCompatibleDC(screen);
+            IntPtr hbmp = bmp.GetHbitmap(Color.FromArgb(0)), old = Native.SelectObject(mem, hbmp);
+            var size = new Native.SIZE { cx = bmp.Width, cy = bmp.Height }; var src = new Native.POINT();
+            var blend = new Native.BLENDFUNCTION { Op = 0, Flags = 0, Alpha = 255, Format = 1 /*AC_SRC_ALPHA*/ };
+            Native.UpdateLayeredWindow(Handle, screen, IntPtr.Zero, ref size, mem, ref src, 0, ref blend, 2 /*ULW_ALPHA*/);
+            Native.SelectObject(mem, old); Native.DeleteObject(hbmp); Native.DeleteDC(mem); Native.ReleaseDC(IntPtr.Zero, screen);
+        }
+
+        int ItemAt(int x) { for (int i = 0; i < items.Count; i++) if (x >= items[i].X && x < items[i].X + items[i].W) return i; return -1; }
+
+        void Redraw() { if (look != null && Visible) { lastSig = null; Show(items, look); } }
+
+        protected override void WndProc(ref Message m)
+        {
+            switch (m.Msg)
+            {
+                case 0x21: m.Result = (IntPtr)3; return;                         // WM_MOUSEACTIVATE -> MA_NOACTIVATE
+                case 0x200:                                                      // WM_MOUSEMOVE
+                {
+                    if (!tracking)
+                    {
+                        var t = new Native.TRACKMOUSEEVENT { dwFlags = 2 /*TME_LEAVE*/, hwndTrack = Handle };
+                        t.cbSize = Marshal.SizeOf(t);
+                        tracking = Native.TrackMouseEvent(ref t);
+                    }
+                    int x = (short)((long)m.LParam & 0xFFFF);
+                    int i = ItemAt(x);
+                    if (i != hover) { hover = i; Redraw(); }
+                    if (i >= 0)
+                    {
+                        Native.RECT r; Native.GetWindowRect(Handle, out r);
+                        var it = items[i];
+                        tip.ShowAt(SlotRenderer.Describe(it.R), new Point(r.L + it.X + it.W / 2, r.T));
+                    }
+                    else tip.Hide();
+                    return;
+                }
+                case 0x2A3: tracking = false; hover = -1; tip.Hide(); Redraw(); return; // WM_MOUSELEAVE
+                case 0x202: tip.Hide(); if (LeftClick != null) LeftClick(); return;    // WM_LBUTTONUP
+                case 0x205: tip.Hide(); if (RightClick != null) RightClick(); return;  // WM_RBUTTONUP
+            }
+            base.WndProc(ref m);
+        }
+
+        public void Dispose() { tip.Dispose(); if (Handle != IntPtr.Zero) DestroyHandle(); }
+    }
+
+    // Dica (nome, % e estado do aparelho) no estilo do Windows 11, acima do painel.
+    class TipWindow : Form
+    {
+        string text = "";
+        public TipWindow()
+        {
+            FormBorderStyle = FormBorderStyle.None; ShowInTaskbar = false; StartPosition = FormStartPosition.Manual;
+            DoubleBuffered = true;
+        }
+        protected override bool ShowWithoutActivation { get { return true; } }
+        protected override CreateParams CreateParams
+        {
+            get { var cp = base.CreateParams; cp.ExStyle |= 0x08000000 | 0x80 | 0x08 | 0x20; return cp; } // NOACTIVATE | TOOLWINDOW | TOPMOST | TRANSPARENT
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            int round = 3; Native.DwmSetWindowAttribute(Handle, 33, ref round, 4); // cantos arredondados pequenos
+        }
+
+        Font TipFont() { return new Font("Segoe UI", 12f * Native.Scale(), FontStyle.Regular, GraphicsUnit.Pixel); }
+
+        // anchor: ponto (tela) no topo do item; a dica aparece centralizada acima dele
+        public void ShowAt(string s, Point anchor)
+        {
+            float sc = Native.Scale();
+            if (s != text || !Visible)
+            {
+                text = s;
+                using (var f = TipFont())
+                {
+                    var sz = TextRenderer.MeasureText(text, f);
+                    Size = new Size(sz.Width + (int)(16 * sc), sz.Height + (int)(10 * sc));
+                }
+            }
+            var scr = Screen.FromPoint(anchor).WorkingArea;
+            int x = Math.Max(scr.Left + 4, Math.Min(anchor.X - Width / 2, scr.Right - Width - 4));
+            Location = new Point(x, anchor.Y - Height - (int)(8 * sc));
+            Invalidate();
+            if (!Visible) Show();
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var t = MenuTheme.Current();
+            e.Graphics.Clear(t.Bg);
+            using (var f = TipFont())
+                TextRenderer.DrawText(e.Graphics, text, f, ClientRectangle, t.Text, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+        }
+    }
+
+    // ------------------------------------------------------------------ Janela "Personalizar": estilo, opções do painel e cada aparelho, com prévia ao vivo
+    class AppearanceForm : Form
+    {
+        readonly Appearance look;
+        readonly Func<List<Reading>> devices;
+        readonly Action changed;
+        readonly MenuTheme t = MenuTheme.Current();
+        readonly float s = Native.Scale();
+        readonly Control preview;
+        readonly TableLayoutPanel devTable;
+        RadioButton rbPanel, rbIcons;
+        readonly List<Control> panelOptions = new List<Control>();
+
+        public AppearanceForm(Appearance look, Func<List<Reading>> devices, Action changed)
+        {
+            this.look = look; this.devices = devices; this.changed = changed;
+            Text = "Personalizar o BatteryTray";
+            FormBorderStyle = FormBorderStyle.FixedSingle; MaximizeBox = false; MinimizeBox = false;
+            StartPosition = FormStartPosition.CenterScreen; AutoSize = true; AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            Font = new Font("Segoe UI", 9.5f);
+            try { Icon = Icon.FromHandle(SlotRenderer.AppIcon()); } catch { }
+
+            var root = new TableLayoutPanel { ColumnCount = 1, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(P(18)), Dock = DockStyle.Fill };
+            Controls.Add(root);
+
+            preview = new PreviewBox(this) { Height = P(64), Width = P(460), Margin = new Padding(0, 0, 0, P(14)) };
+            root.Controls.Add(preview);
+
+            root.Controls.Add(Header("Estilo"));
+            rbPanel = new RadioButton { Text = "Painel na barra de tarefas, ao lado da bandeja", AutoSize = true, Checked = look.Panel };
+            rbIcons = new RadioButton { Text = "Um ícone por aparelho, dentro da bandeja (modo anterior)", AutoSize = true, Checked = !look.Panel };
+            rbPanel.CheckedChanged += (o, e) => { if (rbPanel.Checked) { look.Panel = true; Apply(); } };
+            rbIcons.CheckedChanged += (o, e) => { if (rbIcons.Checked) { look.Panel = false; Apply(); } };
+            root.Controls.Add(rbPanel); root.Controls.Add(rbIcons);
+
+            root.Controls.Add(Header("Painel"));
+            panelOptions.Add(Check(root, "Barra de bateria embaixo da porcentagem", look.ShowBar, v => look.ShowBar = v));
+            panelOptions.Add(Check(root, "Símbolo % depois do número", look.ShowPercent, v => look.ShowPercent = v));
+            panelOptions.Add(Check(root, "Nomes curtos no ícone (ex.: \"600\")", look.ShowLabels, v => look.ShowLabels = v));
+            var sizeRow = new FlowLayoutPanel { AutoSize = true, Margin = new Padding(0, P(4), 0, 0) };
+            sizeRow.Controls.Add(new Label { Text = "Tamanho", AutoSize = true, Margin = new Padding(0, P(6), P(8), 0) });
+            var sizes = new List<RadioButton>();
+            foreach (var name in new[] { "Compacto", "Normal", "Grande" })
+            {
+                int index = sizes.Count;
+                var rb = new RadioButton { Text = name, AutoSize = true, Checked = look.Size == index, Margin = new Padding(0, P(4), P(12), 0) };
+                rb.CheckedChanged += (o, e) => { if (rb.Checked) { look.Size = index; Apply(); } };
+                sizes.Add(rb); sizeRow.Controls.Add(rb);
+            }
+            root.Controls.Add(sizeRow); panelOptions.Add(sizeRow);
+
+            root.Controls.Add(Header("Aparelhos"));
+            root.Controls.Add(new Label { Text = "Clique na cor para trocar. O nome curto aparece no canto do ícone, e as setas mudam a ordem.", AutoSize = true, MaximumSize = new Size(P(460), 0), Tag = "muted", Margin = new Padding(0, 0, 0, P(6)) });
+            devTable = new TableLayoutPanel { ColumnCount = 5, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink };
+            root.Controls.Add(devTable);
+            BuildDevices();
+
+            var footer = new FlowLayoutPanel { FlowDirection = FlowDirection.RightToLeft, AutoSize = true, Dock = DockStyle.Fill, Margin = new Padding(0, P(16), 0, 0) };
+            var close = Btn("Fechar"); close.Click += (o, e) => Close();
+            var reset = Btn("Restaurar padrão");
+            reset.Click += (o, e) =>
+            {
+                look.ShowBar = look.ShowPercent = look.ShowLabels = true; look.Size = 1;
+                look.Colors.Clear(); look.Labels.Clear(); look.Order.Clear();
+                sizes[1].Checked = true;
+                foreach (var c in panelOptions.OfType<CheckBox>()) c.Checked = true;
+                BuildDevices(); Apply();
+            };
+            footer.Controls.Add(close); footer.Controls.Add(reset);
+            root.Controls.Add(footer);
+            AcceptButton = close; CancelButton = close;
+
+            var now = devices().Select(r => new PanelRenderer.Item { R = r }).ToList();
+            preview.Width = Math.Max(P(460), PanelRenderer.Layout(now, look, s) + P(24));
+            Theme(this);
+            UpdateEnabled();
+        }
+
+        int P(float v) { return (int)Math.Round(v * s); }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            int dark = t.Dark ? 1 : 0; Native.DwmSetWindowAttribute(Handle, 20, ref dark, 4); // barra de título escura
+        }
+
+        Label Header(string text)
+        {
+            return new Label { Text = text, AutoSize = true, Font = new Font("Segoe UI Semibold", 10.5f), Margin = new Padding(0, P(10), 0, P(4)) };
+        }
+
+        CheckBox Check(TableLayoutPanel root, string text, bool value, Action<bool> set)
+        {
+            var c = new CheckBox { Text = text, AutoSize = true, Checked = value };
+            c.CheckedChanged += (o, e) => { set(c.Checked); Apply(); };
+            root.Controls.Add(c);
+            return c;
+        }
+
+        Button Btn(string text)
+        {
+            var b = new Button { Text = text, AutoSize = true, FlatStyle = FlatStyle.Flat, Padding = new Padding(P(8), P(2), P(8), P(2)), Margin = new Padding(P(6), 0, 0, 0) };
+            b.FlatAppearance.BorderColor = t.Border;
+            return b;
+        }
+
+        // botão pequeno com seta (ícone do Windows), para mudar a ordem
+        Button Arrow(string glyph, string tip)
+        {
+            var b = new Button { Text = glyph, Font = new Font("Segoe Fluent Icons", 8f), Width = P(30), Height = P(26), FlatStyle = FlatStyle.Flat, Margin = new Padding(P(4), P(3), 0, P(3)) };
+            b.FlatAppearance.BorderColor = t.Border;
+            new ToolTip().SetToolTip(b, tip);
+            return b;
+        }
+
+        // aparelhos na ordem do painel (os sem ordem salva vão para o fim, na ordem padrão)
+        List<Reading> OrderedDevices()
+        {
+            return devices().OrderBy(r => look.OrderOf(r.Key)).ToList();
+        }
+
+        void BuildDevices()
+        {
+            devTable.SuspendLayout();
+            devTable.Controls.Clear(); devTable.RowStyles.Clear();
+            var list = OrderedDevices();
+            if (list.Count == 0) devTable.Controls.Add(new Label { Text = "Nenhum aparelho encontrado ainda.", AutoSize = true, Tag = "muted" });
+            for (int i = 0; i < list.Count; i++)
+            {
+                var r = list[i]; string key = r.Key; int index = i;
+                var swatch = new Button { Tag = "swatch", Width = P(26), Height = P(26), FlatStyle = FlatStyle.Flat, BackColor = look.ColorOf(r), Margin = new Padding(0, P(3), P(10), P(3)), Cursor = Cursors.Hand };
+                swatch.FlatAppearance.BorderColor = t.Border;
+                swatch.Click += (o, e) =>
+                {
+                    using (var dlg = new ColorDialog { Color = swatch.BackColor, FullOpen = true, AnyColor = true })
+                        if (dlg.ShowDialog(this) == DialogResult.OK)
+                        {
+                            look.Colors[key] = dlg.Color.ToArgb(); swatch.BackColor = dlg.Color; Apply();
+                        }
+                };
+                var name = new Label { Text = r.Name, AutoSize = true, Margin = new Padding(0, P(8), P(12), 0) };
+                var label = new TextBox { Text = look.LabelOf(key), MaxLength = 5, Width = P(64), Margin = new Padding(0, P(4), P(8), 0) };
+                label.TextChanged += (o, e) => { look.Labels[key] = label.Text.Trim(); Apply(); };
+                var up = Arrow("", "Subir"); up.Enabled = i > 0; up.Click += (o, e) => MoveDevice(index, -1);
+                var down = Arrow("", "Descer"); down.Enabled = i < list.Count - 1; down.Click += (o, e) => MoveDevice(index, +1);
+                devTable.Controls.Add(swatch, 0, i); devTable.Controls.Add(name, 1, i); devTable.Controls.Add(label, 2, i);
+                devTable.Controls.Add(up, 3, i); devTable.Controls.Add(down, 4, i);
+            }
+            Theme(devTable);
+            devTable.ResumeLayout();
+        }
+
+        void MoveDevice(int index, int delta)
+        {
+            var keys = OrderedDevices().Select(r => r.Key).ToList();
+            int j = index + delta;
+            if (j < 0 || j >= keys.Count) return;
+            var tmp = keys[index]; keys[index] = keys[j]; keys[j] = tmp;
+            foreach (var k in look.Order.Where(k => !keys.Contains(k))) keys.Add(k); // guarda a ordem de aparelhos ausentes agora
+            look.Order.Clear(); look.Order.AddRange(keys);
+            BuildDevices(); Apply();
+        }
+
+        void Apply()
+        {
+            UpdateEnabled();
+            changed();
+            preview.Invalidate();
+        }
+
+        void UpdateEnabled() { foreach (var c in panelOptions) c.Enabled = look.Panel; }
+
+        // cores do tema do Windows (claro/escuro); amostras de cor ("swatch") ficam com a cor do aparelho
+        void Theme(Control c)
+        {
+            if ("swatch".Equals(c.Tag)) return;
+            c.BackColor = c is TextBox || c is ComboBox ? (t.Dark ? Color.FromArgb(32, 32, 32) : Color.White) : c is Button ? t.Hover : t.Bg;
+            c.ForeColor = "muted".Equals(c.Tag) ? t.Muted : t.Text;
+            foreach (Control child in c.Controls) Theme(child);
+        }
+
+        // Prévia: o painel desenhado sobre a cor da barra de tarefas
+        class PreviewBox : Control
+        {
+            readonly AppearanceForm f;
+            public PreviewBox(AppearanceForm f) { this.f = f; DoubleBuffered = true; }
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                bool light = SlotRenderer.LightTheme();
+                e.Graphics.Clear(light ? Color.FromArgb(238, 238, 238) : Color.FromArgb(28, 28, 28));
+                if (!f.look.Panel)
+                {
+                    TextRenderer.DrawText(e.Graphics, "Modo de ícones na bandeja: cada aparelho é um ícone que você fixa na barra.", Font, ClientRectangle,
+                        light ? Color.FromArgb(80, 80, 80) : Color.FromArgb(180, 180, 180), TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.WordBreak);
+                    return;
+                }
+                var items = f.OrderedDevices().Select(r => new PanelRenderer.Item { R = r, Color = f.look.ColorOf(r), Label = f.look.LabelOf(r.Key) }).ToList();
+                if (items.Count == 0) return;
+                int h = (int)(48 * f.s), w = PanelRenderer.Layout(items, f.look, f.s);
+                using (var b = PanelRenderer.Render(items, f.look, f.s, w, h, light, -1))
+                    e.Graphics.DrawImage(b, Math.Max(0, (Width - w) / 2), (Height - h) / 2);
+            }
+        }
     }
 
     // ------------------------------------------------------------------ Um ícone de bandeja por aparelho (é ele que o usuário fixa e arrasta)
@@ -1865,7 +2451,7 @@ namespace BatteryTray
     static class Updater
     {
         // Ao publicar uma versão nova, mude este número e crie a tag "v" + número (veja release.ps1).
-        public const string Version = "1.4.0";
+        public const string Version = "1.5.0";
         const string Repo = "HenriqueGomez/BatteryTray";
         const string Agent = "BatteryTray-Updater";
 
@@ -2228,9 +2814,22 @@ namespace BatteryTray
         readonly System.Windows.Forms.Timer layoutTimer, watchTimer;
         readonly Dictionary<string, Rectangle?> placedAt = new Dictionary<string, Rectangle?>(); // posição usada no último Layout (ícones fixados)
 
+        // aparência (painel ou ícones), o painel na barra e a janela "Personalizar"
+        readonly Appearance look = Appearance.Load();
+        readonly PanelWindow panel = new PanelWindow();
+        AppearanceForm appearanceForm;
+        string panelGeom;
+
         // Se algum ícone fixado mudou de lugar desde o último Layout, refaz na hora (o desenho não fica no lugar antigo).
+        // No modo painel, observa a bandeja e a área dos apps abertos.
         void WatchPositions()
         {
+            if (look.Panel)
+            {
+                string g = Native.TaskbarPart("TrayNotifyWnd") + "|" + Native.TaskbarPart("ReBarWindow32") + "|" + Native.TaskbarRect();
+                if (g != panelGeom) { panelGeom = g; Layout(); }
+                return;
+            }
             foreach (var kv in placedAt)
             {
                 if (!tray.Has(kv.Key)) continue;
@@ -2387,7 +2986,9 @@ namespace BatteryTray
             watchTimer = new System.Windows.Forms.Timer { Interval = 250 };
             watchTimer.Tick += (s, e) => WatchPositions();
             watchTimer.Start();
-            SystemEvents.UserPreferenceChanged += (s, e) => { foreach (var o in overlays.Values) o.Invalidate(); Layout(); };
+            SystemEvents.UserPreferenceChanged += (s, e) => { foreach (var o in overlays.Values) o.Invalidate(); panel.Invalidate(); Layout(); };
+            panel.LeftClick = RefreshNow;
+            panel.RightClick = ShowMenu;
             poll = new System.Threading.Timer(_ => Tick(), null, 0, 60000);
             // verifica atualizações 20 s depois de abrir e a cada 6 horas
             updateTimer = new System.Threading.Timer(_ => ui.Post(__ => CheckUpdates(false), null), null, 5000, 6 * 3600 * 1000);
@@ -2464,7 +3065,7 @@ namespace BatteryTray
                 if (level == 0 || (warnedAt.TryGetValue(r.Key, out done) && done <= level)) continue;
                 warnedAt[r.Key] = level;
                 pendingClick = null; // clicar no aviso de bateria só abre o menu
-                tray.Notify(r.Key, "Bateria baixa: " + r.Name,
+                tray.Notify(NotifyKey(r.Key), "Bateria baixa: " + r.Name,
                     (r.LevelText != null ? "Cerca de " : "") + r.Percent + "% restantes. " + (level == 5 ? "Coloque para carregar agora." : "Coloque para carregar em breve."));
             }
         }
@@ -2485,22 +3086,61 @@ namespace BatteryTray
         const string AppIconKey = "__app__";
         IntPtr appIcon;
 
-        // Sem nenhum aparelho visível, mostra um ícone do BatteryTray (dentro da "^") só para abrir o menu.
-        void UpdateAppIcon()
+        // Ícone do BatteryTray (dentro da "^"): no modo painel, sempre (notificações e o menu, se o painel não couber);
+        // no modo de ícones, só quando nenhum aparelho está visível.
+        string appTip;
+        void UpdateAppIcon(bool panelShown)
         {
             bool anyVisible = state.Keys.Any(IsVisible);
-            if (anyVisible) { tray.Remove(AppIconKey); return; }
-            if (tray.Has(AppIconKey)) return;
+            if (!look.Panel && anyVisible) { tray.Remove(AppIconKey); appTip = null; return; }
+            string tip = state.Count == 0 ? "BatteryTray: procurando dispositivos..."
+                       : !anyVisible ? "BatteryTray: todos os dispositivos estão ocultos"
+                       : !panelShown ? "BatteryTray: sem espaço na barra para o painel"
+                       : "BatteryTray";
+            tip += "\nClique com o botão direito para abrir o menu";
+            if (tray.Has(AppIconKey) && tip == appTip) return;
             if (appIcon == IntPtr.Zero) { appIcon = SlotRenderer.AppIcon(); tray.SharedIcons.Add(appIcon); }
-            string tip = state.Count == 0 ? "BatteryTray: procurando dispositivos..." : "BatteryTray: todos os dispositivos estão ocultos";
-            tray.Set(AppIconKey, appIcon, tip + "\nClique com o botão direito para abrir o menu");
+            appTip = tip;
+            tray.Set(AppIconKey, appIcon, tip);
+        }
+
+        // Modo painel: os aparelhos são desenhados num painel ao lado da bandeja, sem um ícone de bandeja para cada um.
+        List<PanelRenderer.Item> PanelItems()
+        {
+            return Ordered().Where(r => IsVisible(r.Key)).OrderBy(r => look.OrderOf(r.Key))
+                .Select(r => new PanelRenderer.Item { R = r, Color = look.ColorOf(r), Label = look.LabelOf(r.Key) }).ToList();
+        }
+
+        void LayoutPanel()
+        {
+            foreach (var r in state.Values)
+            {
+                tray.Remove(r.Key); iconSig.Remove(r.Key);
+                SlotOverlay o; if (overlays.TryGetValue(r.Key, out o)) o.Show(r, null);
+            }
+            placedAt.Clear();
+            bool shown = panel.Show(PanelItems(), look);
+            UpdateAppIcon(shown);
+        }
+
+        // chave do ícone de onde sai a notificação de um aparelho (no modo painel, o ícone do app)
+        string NotifyKey(string key) { return tray.Has(key) ? key : AppIconKey; }
+
+        void OpenAppearance()
+        {
+            if (appearanceForm != null && !appearanceForm.IsDisposed) { appearanceForm.Activate(); return; }
+            appearanceForm = new AppearanceForm(look, () => Ordered().ToList(), () => { look.Save(); panel.Invalidate(); Layout(); });
+            appearanceForm.Show();
+            appearanceForm.Activate();
         }
 
         readonly Dictionary<string, string> layoutInfo = new Dictionary<string, string>(); // para o diagnóstico
 
         void Layout()
         {
-            UpdateAppIcon();
+            if (look.Panel) { LayoutPanel(); return; }
+            panel.Hide();
+            UpdateAppIcon(false);
             var tb = Native.TaskbarRect();
             var pinned = tray.PinnedUids();
             foreach (var r in Ordered())
@@ -2575,6 +3215,7 @@ namespace BatteryTray
             m.Items.Add(new StatusItem("", () => refreshStatus ?? "Atualizar agora", RefreshFromMenu, s));
             m.Items.Add(new ActionItem("", "Iniciar com o Windows", () => SetAutoStart(!IsAutoStart()), IsAutoStart, s));
             m.Items.Add(new ActionItem("\uEA8F", "Avisar bateria baixa", () => SetAlerts(!AlertsOn()), AlertsOn, s));
+            m.Items.Add(new ActionItem("\uE790", "Personalizar...", OpenAppearance, null, s));
             m.Items.Add(new UpdateItem(() => available, () => updateStatus, () => CheckUpdates(true), ApplyUpdate, s));
             m.Items.Add(new StatusItem("", () => diagStatus ?? "Gerar diagnóstico", RunDiagnostics, s));
             m.AddSeparator();
@@ -2600,6 +3241,8 @@ namespace BatteryTray
         {
             poll.Dispose(); layoutTimer.Stop(); watchTimer.Stop(); if (updateTimer != null) updateTimer.Dispose();
             foreach (var o in overlays.Values) o.Dispose();
+            panel.Dispose();
+            if (appearanceForm != null && !appearanceForm.IsDisposed) appearanceForm.Dispose();
             tray.Dispose();
             base.ExitThreadCore();
         }
@@ -2660,6 +3303,33 @@ namespace BatteryTray
             all.Add(new Reading { Kind = DeviceKind.Headset, Percent = 45, Online = true, Charging = true });
             all.Add(new Reading { Kind = DeviceKind.Controller, Percent = 9, Online = true });
             all.Add(new Reading { Kind = DeviceKind.Keyboard, Percent = 100, Online = true });
+            // prévia do painel (escuro e claro), com os exemplos da imagem de referência e os estados especiais
+            var look = new Appearance();
+            Func<DeviceKind, int, bool, bool, string, PanelRenderer.Item> mk = (k, p, on, ch, lbl) =>
+                new PanelRenderer.Item { R = new Reading { Key = "x" + k + p, Kind = k, Percent = p, Online = on, Charging = ch, Name = k.ToString() }, Color = Appearance.DefaultColor(k), Label = lbl };
+            var sample = new List<PanelRenderer.Item> {
+                mk(DeviceKind.Headset, 90, true, false, "600"), mk(DeviceKind.Headset, 100, true, false, "650"),
+                mk(DeviceKind.Mouse, 100, true, false, ""), mk(DeviceKind.Controller, 85, true, false, ""),
+                mk(DeviceKind.Mouse, 45, true, true, ""), mk(DeviceKind.Keyboard, 9, true, false, ""), mk(DeviceKind.Headset, 80, false, false, "") };
+            int pw = 0;
+            foreach (int size in new[] { 1, 0, 2 }) { look.Size = size; pw = Math.Max(pw, PanelRenderer.Layout(sample, look, 1f)); }
+            using (var panelSheet = new Bitmap(pw + 20, 48 * 6 + 10))
+            using (var g = Graphics.FromImage(panelSheet))
+            {
+                g.Clear(Color.Gray);
+                int row = 0;
+                foreach (bool light in new[] { false, true })
+                    foreach (int size in new[] { 1, 0, 2 })
+                    {
+                        look.Size = size;
+                        int ww = PanelRenderer.Layout(sample, look, 1f);
+                        using (var bg = new SolidBrush(light ? Color.FromArgb(238, 238, 238) : Color.FromArgb(28, 28, 28))) g.FillRectangle(bg, 0, row * 48, panelSheet.Width, 48);
+                        using (var b = PanelRenderer.Render(sample, look, 1f, ww, 48, light, row == 0 ? 0 : -1)) g.DrawImage(b, 10, row * 48);
+                        row++;
+                    }
+                panelSheet.Save(Path.Combine(outDir, "panel.png"), ImageFormat.Png);
+            }
+
             int w = 32, h = 48, gap = 8, z = 4;
             using (var sheet = new Bitmap((w + gap) * all.Count * z, h * z))
             using (var g = Graphics.FromImage(sheet))

@@ -1,18 +1,18 @@
 # BatteryTray
 
-Mostra a bateria dos seus dispositivos sem fio (mouse, headset, teclado, controle) **direto na barra de tarefas do Windows 11**. Cada aparelho vira um ícone fixado, com o desenho do aparelho em cima e a porcentagem embaixo.
+Mostra a bateria dos seus dispositivos sem fio (mouse, headset, teclado, controle) **direto na barra de tarefas do Windows 11**, num painel ao lado da bandeja: o ícone colorido de cada aparelho, a porcentagem e uma barra de bateria.
 
-<p align="center"><img src="docs/menu.png" alt="Menu do BatteryTray e os ícones na barra de tarefas" width="300"></p>
+![Painel do BatteryTray nos temas escuro e claro: headsets com nome curto, mouse, controle, carregando, bateria baixa e desligado](docs/painel.png)
 
-Como cada aparelho aparece na barra (prévia ampliada):
-
-![Estados: normal, desligado (apagado), carregando (raio), bateria baixa (vermelho)](docs/icones.png)
-
-- **Normal:** a porcentagem, por exemplo `80%`.
+- **Normal:** o ícone na cor do aparelho, a porcentagem e a barra.
 - **Carregando:** o `%` vira um raio, por exemplo `45⚡`.
-- **Desligado ou fora de alcance:** o ícone fica apagado e mostra o último valor conhecido. Passando o mouse, aparece quando ele foi lido, por exemplo "lido ontem às 22:00".
-- **Bateria baixa (15% ou menos):** o texto fica vermelho e, se o aviso estiver ligado, chega uma notificação.
-- **Detalhes:** passando o mouse, aparece o nome do aparelho e a porcentagem.
+- **Desligado ou fora de alcance:** fica cinza e mostra o último valor conhecido. Passando o mouse, aparece quando ele foi lido, por exemplo "lido ontem às 22:00".
+- **Bateria baixa (15% ou menos):** fica vermelho e, se o aviso estiver ligado, chega uma notificação.
+- **Detalhes:** passando o mouse, aparece o nome do aparelho e a porcentagem. Clique para reler as baterias; clique com o botão direito para abrir o menu.
+
+Cores, nomes curtos (como o `600` acima), ordem, tamanho, barra e `%` podem ser trocados em **Personalizar...**, no menu. Quem preferir o visual anterior, um ícone por aparelho dentro da bandeja, também escolhe lá.
+
+<p align="center"><img src="docs/menu.png" alt="Menu do BatteryTray" width="300"></p>
 
 ## Instalação
 
@@ -21,16 +21,17 @@ Como cada aparelho aparece na barra (prévia ampliada):
 3. Abra o `BatteryTray.exe`. O executável não é assinado digitalmente, então na primeira vez o Windows pode mostrar **"O Windows protegeu o computador"**. Clique em **Mais informações → Executar assim mesmo**. Se preferir, compile você mesmo a partir do código (veja [Compilar](#compilar)).
 
    > **Bloqueado pelo Controle Inteligente de Aplicativos?** Esse recurso do Windows 11 bloqueia todo programa sem assinatura digital, e o BatteryTray ainda não tem uma. Ele não tem a opção "Executar assim mesmo" nem aceita exceção para um app só, e compilar você mesmo não muda isso. A única forma de usar o app é desligar o recurso em *Segurança do Windows → Controle de aplicativos e do navegador → Configurações do Controle Inteligente de Aplicativos*. Com o Windows atualizado (desde abril de 2026), dá para religar depois pelo mesmo lugar. Em versões anteriores, desligar era definitivo e só voltava reinstalando o Windows.
-4. Os aparelhos encontrados aparecem dentro da setinha **`^`** da bandeja. **Arraste cada um para a barra de tarefas** e o Windows passa a lembrar dessa posição.
-5. No menu (clique direito no ícone), ligue **Iniciar com o Windows**.
+4. Os aparelhos encontrados aparecem no painel, à esquerda da bandeja. Se os apps abertos ocuparem esse espaço, o painel some até ter lugar de novo; o menu continua no ícone de bateria do BatteryTray, dentro da setinha **`^`**.
+5. No menu (clique direito no painel), ligue **Iniciar com o Windows**.
 
 **Requisitos:** Windows 11. Não precisa instalar nada além do app: ele usa o .NET Framework 4.8, que já vem no Windows.
 
 ## Menu
 
-O menu abre com o clique direito em qualquer aparelho, ou no ícone de bateria quando nenhum aparelho estiver visível:
+O menu abre com o clique direito no painel (ou em qualquer aparelho, no modo de ícones), ou no ícone de bateria do BatteryTray, dentro da setinha `^`:
 
 - **Dispositivos na barra:** escolha quais aparelhos aparecem. Os interruptores não fecham o menu.
+- **Personalizar...:** abre uma janela com prévia ao vivo. Nela você escolhe o estilo (painel ou um ícone por aparelho na bandeja), liga ou desliga a barra, o `%` e os nomes curtos, troca o tamanho e, para cada aparelho, a cor, o nome curto e a ordem.
 - **Atualizar agora:** relê as baterias sem fechar o menu. Isso também acontece sozinho a cada minuto.
 - **Iniciar com o Windows.**
 - **Avisar bateria baixa:** mostra uma notificação do Windows quando um aparelho chega a 15% e outra em 5%. Depois de carregar, volta a avisar. Respeita o "Não incomodar". Vem ligado.
@@ -74,7 +75,7 @@ Se o app nem abrir, rode `BatteryTray.exe --diagnostico` no terminal, na pasta d
 - **Aparelhos:** lê a bateria conversando direto com receptores Logitech e Razer (somente comandos de leitura) e com as propriedades de dispositivos do Windows.
 - **Arquivos:** lê os logs do Razer Synapse em `%LOCALAPPDATA%\Razer\RazerAppEngine\User Data\Logs`. Só grava o arquivo de diagnóstico quando você pede, e ele não é enviado a lugar nenhum.
 - **Registro do Windows, só no seu usuário:**
-  - `HKCU\Software\BatteryTray` guarda os aparelhos ocultos, a identificação de cada ícone, se o aviso de bateria baixa está ligado e a última versão nova avisada;
+  - `HKCU\Software\BatteryTray` guarda os aparelhos ocultos, a identificação de cada ícone, se o aviso de bateria baixa está ligado, a última versão nova avisada e a aparência escolhida em **Personalizar...**;
   - `HKCU\...\CurrentVersion\Run` guarda o início com o Windows, se você ligar.
 
 ## Desinstalar

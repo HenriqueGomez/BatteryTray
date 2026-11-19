@@ -12,6 +12,14 @@ Como usar (mantenedor):
 
 ## [Não publicado]
 
+## [1.5.0] - 2026-11-19
+
+### Novidades
+- **Painel na barra de tarefas:** os aparelhos agora aparecem lado a lado num painel à esquerda da bandeja, cada um com o ícone colorido, a porcentagem e uma barra de bateria. Passar o mouse destaca o grupo todo e mostra os detalhes do aparelho. Clique para reler as baterias, e clique com o botão direito para abrir o menu.
+- **Personalizar...**, no menu: uma janela com prévia ao vivo para escolher a cor, o nome curto (ex.: "600") e a ordem de cada aparelho. Também dá para ligar ou desligar a barra, o `%` e os nomes curtos, e escolher o tamanho (compacto, normal ou grande).
+- O visual anterior, um ícone por aparelho dentro da bandeja, continua disponível em **Personalizar...**.
+- Quando os apps abertos ocupam o espaço do painel, ele some até ter lugar de novo. O menu e as notificações continuam no ícone de bateria do BatteryTray, dentro da setinha `^`.
+
 ## [1.4.0] - 2026-11-17
 
 ### Novidades
