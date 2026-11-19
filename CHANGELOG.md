@@ -12,6 +12,11 @@ Como usar (mantenedor):
 
 ## [Não publicado]
 
+## [1.5.1] - 2026-11-19
+
+### Melhorias
+- No painel, cada aparelho virou uma grade: ícone e porcentagem em cima, nome curto e barra embaixo. O nome curto não fica mais por cima do ícone. Sem nome, o ícone fica centralizado; sem barra, a porcentagem também. A largura de cada aparelho se ajusta ao nome.
+
 ## [1.5.0] - 2026-11-19
 
 ### Novidades

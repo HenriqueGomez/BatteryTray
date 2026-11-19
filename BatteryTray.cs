@@ -1465,33 +1465,56 @@ namespace BatteryTray
     // ------------------------------------------------------------------ Desenho do painel: ícone colorido, % ao lado e barra de bateria embaixo
     static class PanelRenderer
     {
-        public class Item { public Reading R; public Color Color; public string Label; public int X, W; }
+        public class Item { public Reading R; public Color Color; public string Label; public int X, W; public float ColA; }
 
-        static readonly float[] IconPx = { 17, 20, 24 }, TextPx = { 13, 15.5f, 18.5f };
+        // Cada aparelho é uma grade 2x2:   ícone | porcentagem
+        //                                  nome  | barra
+        // Sem nome, o ícone fica centralizado na altura; sem barra, a porcentagem também.
+        static readonly float[] IconPx = { 16, 19, 23 }, TextPx = { 13, 15.5f, 18.5f }, LabelPx = { 8.5f, 9.5f, 11f };
+        const float PadL = 6, Gap = 6, PadR = 8, StackGap = 3;
         const string IconFont = "Segoe Fluent Icons";
 
-        static Font Make(string family, float px, FontStyle style, string fallback)
+        static FontFamily Family(string name, string fallback)
         {
-            var f = new Font(family, px, style, GraphicsUnit.Pixel);
-            if (f.Name != family) { f.Dispose(); f = new Font(fallback, px, style, GraphicsUnit.Pixel); }
-            return f;
+            try { return new FontFamily(name); } catch (ArgumentException) { return new FontFamily(fallback); }
         }
 
-        // Posiciona os itens (X, W) e devolve a largura total. A coluna de texto tem sempre a largura de "100%",
-        // para o painel não mudar de tamanho quando a porcentagem muda.
+        // Contorno do texto: as medidas vêm do desenho real das letras, sem as sobras da fonte
+        static GraphicsPath TextPath(string text, FontFamily fam, FontStyle st, float px)
+        {
+            var p = new GraphicsPath();
+            using (var fmt = (StringFormat)StringFormat.GenericTypographic.Clone())
+                p.AddString(text, fam, (int)st, px, PointF.Empty, fmt);
+            return p;
+        }
+
+        static void FillAt(Graphics g, GraphicsPath p, Color c, float dx, float dy)
+        {
+            using (var m = new Matrix()) { m.Translate(dx, dy); p.Transform(m); }
+            using (var b = new SolidBrush(c)) g.FillPath(b, p);
+        }
+
+        static bool HasLabel(Appearance a, Item it) { return a.ShowLabels && !string.IsNullOrEmpty(it.Label); }
+
+        // Posiciona os itens (X, W) e devolve a largura total. A coluna da porcentagem tem sempre a largura de "100%",
+        // para o painel não mudar de tamanho quando o valor muda; a do ícone cresce para caber o nome curto.
         public static int Layout(List<Item> items, Appearance a, float s)
         {
-            using (var bmp = new Bitmap(1, 1))
-            using (var g = Graphics.FromImage(bmp))
-            using (var tf = Make("Segoe UI Variable Display", TextPx[a.Size] * s, FontStyle.Bold, "Segoe UI"))
-            using (var fmt = (StringFormat)StringFormat.GenericTypographic.Clone())
+            using (var tfam = Family("Segoe UI Variable Display", "Segoe UI"))
+            using (var lfam = Family("Segoe UI", "Arial"))
+            using (var reference = TextPath(a.ShowPercent ? "100%" : "100", tfam, FontStyle.Bold, TextPx[a.Size] * s))
             {
-                float col = g.MeasureString(a.ShowPercent ? "100%" : "100", tf, 1000, fmt).Width;
+                float colB = reference.GetBounds().Width;
                 int x = 0;
                 foreach (var it in items)
                 {
+                    float colA = IconPx[a.Size] * s;
+                    if (HasLabel(a, it))
+                        using (var lp = TextPath(it.Label, lfam, FontStyle.Bold, LabelPx[a.Size] * s))
+                            colA = Math.Max(colA, lp.GetBounds().Width);
+                    it.ColA = colA;
                     it.X = x;
-                    it.W = (int)Math.Ceiling((6 + IconPx[a.Size] + 5) * s + col + 8 * s);
+                    it.W = (int)Math.Ceiling((PadL + Gap + PadR) * s + colA + colB);
                     x += it.W;
                 }
                 return x;
@@ -1502,16 +1525,13 @@ namespace BatteryTray
         {
             var bmp = new Bitmap(Math.Max(1, w), Math.Max(1, h), PixelFormat.Format32bppArgb);
             using (var g = Graphics.FromImage(bmp))
-            using (var fmt = (StringFormat)StringFormat.GenericTypographic.Clone())
-            using (var gf = Make(IconFont, IconPx[a.Size] * s, FontStyle.Regular, "Segoe MDL2 Assets"))
-            using (var tf = Make("Segoe UI Variable Display", TextPx[a.Size] * s, FontStyle.Bold, "Segoe UI"))
-            using (var bf = Make(IconFont, TextPx[a.Size] * 0.8f * s, FontStyle.Regular, "Segoe MDL2 Assets"))
-            using (var lf = Make("Segoe UI", 8.5f * s, FontStyle.Bold, "Arial"))
+            using (var ifam = Family(IconFont, "Segoe MDL2 Assets"))
+            using (var tfam = Family("Segoe UI Variable Display", "Segoe UI"))
+            using (var lfam = Family("Segoe UI", "Arial"))
+            using (var reference = TextPath(a.ShowPercent ? "100%" : "100", tfam, FontStyle.Bold, TextPx[a.Size] * s))
             {
                 g.Clear(Color.FromArgb(1, 0, 0, 0)); // quase transparente: o painel recebe o mouse
                 g.SmoothingMode = SmoothingMode.AntiAlias;
-                g.TextRenderingHint = TextRenderingHint.AntiAlias;
-                fmt.FormatFlags |= StringFormatFlags.MeasureTrailingSpaces;
                 Color fg = light ? Color.FromArgb(26, 26, 26) : Color.White;
                 Color low = light ? Color.FromArgb(196, 43, 28) : Color.FromArgb(255, 95, 95);
 
@@ -1521,54 +1541,65 @@ namespace BatteryTray
                     using (var p = RoundRect(new RectangleF(1 * s, 4 * s, w - 2 * s, h - 8 * s), 5 * s))
                         g.FillPath(b, p);
 
-                float textH = tf.GetHeight(g) * 0.78f, barH = a.ShowBar ? 3 * s : 0, barGap = a.ShowBar ? 4 * s : 0;
+                // linhas da grade: porcentagem em cima e barra embaixo (sem barra, a porcentagem fica no meio)
+                var rb = reference.GetBounds();
+                float colB = rb.Width, textH = rb.Height;
+                float barH = a.ShowBar ? 3 * s : 0, barGap = a.ShowBar ? 5 * s : 0;
+                float textTop = (h - (textH + barGap + barH)) / 2f, barY = textTop + textH + barGap;
+
                 foreach (var it in items)
                 {
                     var r = it.R;
                     bool isLow = r.Online && r.Percent >= 0 && r.Percent <= 15 && !r.Charging;
                     Color dev = !r.Online ? Color.FromArgb(120, 140, 140, 140) : isLow ? low : it.Color;
                     Color text = !r.Online ? Color.FromArgb(120, fg) : isLow ? low : fg;
+                    float colAX = it.X + PadL * s, colBX = colAX + it.ColA + Gap * s;
 
-                    // ícone do aparelho, na cor dele
-                    string glyph = SlotRenderer.Glyph(r.Kind);
-                    var gs = g.MeasureString(glyph, gf, 1000, fmt);
-                    float ix = it.X + 6 * s, iy = (h - gs.Height) / 2f;
-                    using (var b = new SolidBrush(dev)) g.DrawString(glyph, gf, b, ix, iy, fmt);
-
-                    // nome curto (ex.: "600") no canto de baixo do ícone, com contorno para ler sobre o desenho
-                    if (a.ShowLabels && !string.IsNullOrEmpty(it.Label))
-                        using (var path = new GraphicsPath())
-                        {
-                            path.AddString(it.Label, lf.FontFamily, (int)FontStyle.Bold, lf.Size, PointF.Empty, fmt);
-                            var lb = path.GetBounds();
-                            using (var m = new Matrix()) { m.Translate(ix - 2 * s - lb.X, iy + gs.Height - lb.Height - 1 * s - lb.Y); path.Transform(m); }
-                            using (var pen = new Pen(light ? Color.FromArgb(240, 240, 240) : Color.FromArgb(20, 20, 20), 2.5f * s) { LineJoin = LineJoin.Round })
-                                g.DrawPath(pen, path);
-                            using (var b = new SolidBrush(text)) g.FillPath(b, path);
-                        }
-
-                    // porcentagem (ou raio, carregando) e a barra embaixo
-                    float tx = ix + IconPx[a.Size] * s + 5 * s;
-                    float col = it.X + it.W - 8 * s - tx;
-                    float blockH = textH + barGap + barH, ty = (h - blockH) / 2f - tf.GetHeight(g) * 0.11f;
+                    // coluna da direita: porcentagem (ou raio, carregando) e barra
                     string num = SlotRenderer.Number(r);
                     bool bolt = SlotRenderer.ShowBolt(r);
-                    using (var b = new SolidBrush(text))
+                    using (var tp = TextPath(bolt || !a.ShowPercent ? num : num + "%", tfam, FontStyle.Bold, TextPx[a.Size] * s))
                     {
-                        string t = bolt || !a.ShowPercent ? num : num + "%";
-                        g.DrawString(t, tf, b, tx, ty, fmt);
+                        var tb = tp.GetBounds();
+                        FillAt(g, tp, text, colBX - tb.X, textTop - rb.Y);
                         if (bolt)
-                        {
-                            float tw = g.MeasureString(t, tf, 1000, fmt).Width;
-                            using (var cb = new SolidBrush(dev)) g.DrawString(SlotRenderer.Bolt, bf, cb, tx + tw + 1 * s, ty + TextPx[a.Size] * 0.22f * s, fmt);
-                        }
+                            using (var bp = TextPath(SlotRenderer.Bolt, ifam, FontStyle.Regular, TextPx[a.Size] * 0.85f * s))
+                            {
+                                var bb = bp.GetBounds();
+                                FillAt(g, bp, dev, colBX + tb.Width + 2 * s - bb.X, textTop + (textH - bb.Height) / 2f - bb.Y);
+                            }
                     }
                     if (a.ShowBar)
                     {
-                        float by = (h - blockH) / 2f + textH + barGap;
-                        using (var track = new SolidBrush(Color.FromArgb(light ? 40 : 55, fg))) g.FillRectangle(track, tx, by, col, barH);
+                        using (var track = new SolidBrush(Color.FromArgb(light ? 40 : 55, fg))) g.FillRectangle(track, colBX, barY, colB, barH);
                         float pct = r.Percent < 0 ? 0 : Math.Min(100, r.Percent) / 100f;
-                        using (var fill = new SolidBrush(dev)) g.FillRectangle(fill, tx, by, col * pct, barH);
+                        using (var fill = new SolidBrush(dev)) g.FillRectangle(fill, colBX, barY, colB * pct, barH);
+                    }
+
+                    // coluna da esquerda: ícone na cor do aparelho e, se houver, o nome curto embaixo
+                    using (var ip = TextPath(SlotRenderer.Glyph(r.Kind), ifam, FontStyle.Regular, IconPx[a.Size] * s))
+                    {
+                        var ib = ip.GetBounds();
+                        float iconTop = (h - ib.Height) / 2f;
+                        if (HasLabel(a, it))
+                            using (var lp = TextPath(it.Label, lfam, FontStyle.Bold, LabelPx[a.Size] * s))
+                            {
+                                var lb = lp.GetBounds();
+                                float labelTop;
+                                if (a.ShowBar)
+                                {
+                                    labelTop = barY + barH / 2f - lb.Height / 2f;       // nome na linha da barra
+                                    iconTop = Math.Max(2 * s, labelTop - StackGap * s - ib.Height);
+                                }
+                                else
+                                {
+                                    iconTop = (h - (ib.Height + StackGap * s + lb.Height)) / 2f; // ícone + nome no meio
+                                    labelTop = iconTop + ib.Height + StackGap * s;
+                                }
+                                Color lc = !r.Online ? text : Color.FromArgb(light ? 200 : 215, fg);
+                                FillAt(g, lp, lc, colAX + (it.ColA - lb.Width) / 2f - lb.X, labelTop - lb.Y);
+                            }
+                        FillAt(g, ip, dev, colAX + (it.ColA - ib.Width) / 2f - ib.X, iconTop - ib.Y);
                     }
                 }
             }
@@ -2451,7 +2482,7 @@ namespace BatteryTray
     static class Updater
     {
         // Ao publicar uma versão nova, mude este número e crie a tag "v" + número (veja release.ps1).
-        public const string Version = "1.5.0";
+        public const string Version = "1.5.1";
         const string Repo = "HenriqueGomez/BatteryTray";
         const string Agent = "BatteryTray-Updater";
 
@@ -3308,7 +3339,7 @@ namespace BatteryTray
             Func<DeviceKind, int, bool, bool, string, PanelRenderer.Item> mk = (k, p, on, ch, lbl) =>
                 new PanelRenderer.Item { R = new Reading { Key = "x" + k + p, Kind = k, Percent = p, Online = on, Charging = ch, Name = k.ToString() }, Color = Appearance.DefaultColor(k), Label = lbl };
             var sample = new List<PanelRenderer.Item> {
-                mk(DeviceKind.Headset, 90, true, false, "600"), mk(DeviceKind.Headset, 100, true, false, "650"),
+                mk(DeviceKind.Headset, 90, true, false, "600"), mk(DeviceKind.Headset, 100, true, false, "650"), mk(DeviceKind.Mouse, 75, true, false, "G502"), mk(DeviceKind.Headset, 80, false, false, "V3Pro"),
                 mk(DeviceKind.Mouse, 100, true, false, ""), mk(DeviceKind.Controller, 85, true, false, ""),
                 mk(DeviceKind.Mouse, 45, true, true, ""), mk(DeviceKind.Keyboard, 9, true, false, ""), mk(DeviceKind.Headset, 80, false, false, "") };
             int pw = 0;
