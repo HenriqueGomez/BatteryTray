@@ -12,6 +12,16 @@ Como usar (mantenedor):
 
 ## [Não publicado]
 
+## [1.5.2] - 2026-11-19
+
+### Melhorias
+- Tamanhos do painel reorganizados: o novo **Compacto** mostra só o ícone e a bateria (`%` ou raio), sem nome curto e sem barra. O **Normal** é o antigo compacto, e o **Grande** é o antigo normal. Quem atualizar continua com o mesmo visual.
+
+### Correções
+- Mouses e teclados Logitech ligados no cabo, por exemplo para carregar, apareciam repetidos, 7 vezes. Isso acontecia porque eles respondem em todas as posições que o app pergunta. Agora só receptores são perguntados posição por posição.
+- Ao ligar ou desligar um aparelho, por exemplo plugar o cabo para carregar, o painel só mudava na leitura seguinte, que acontece a cada minuto. Agora o app relê na hora (~1,5 s) e de novo alguns segundos depois.
+- O mesmo aparelho Logitech pelo receptor e pelo cabo virava dois itens. Agora é um só, com a leitura de quem está ligado (no cabo, com o raio de carregando), mantendo o nome curto, a cor, a ordem e a fixação escolhidos para ele.
+
 ## [1.5.1] - 2026-11-19
 
 ### Melhorias

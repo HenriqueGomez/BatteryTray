@@ -31,7 +31,7 @@ Cores, nomes curtos (como o `600` acima), ordem, tamanho, barra e `%` podem ser 
 O menu abre com o clique direito no painel (ou em qualquer aparelho, no modo de ícones), ou no ícone de bateria do BatteryTray, dentro da setinha `^`:
 
 - **Dispositivos na barra:** escolha quais aparelhos aparecem. Os interruptores não fecham o menu.
-- **Personalizar...:** abre uma janela com prévia ao vivo. Nela você escolhe o estilo (painel ou um ícone por aparelho na bandeja), liga ou desliga a barra, o `%` e os nomes curtos, troca o tamanho e, para cada aparelho, a cor, o nome curto e a ordem.
+- **Personalizar...:** abre uma janela com prévia ao vivo. Nela você escolhe o estilo (painel ou um ícone por aparelho na bandeja), liga ou desliga a barra, o `%` e os nomes curtos, troca o tamanho (o **Compacto** mostra só o ícone e a bateria) e, para cada aparelho, a cor, o nome curto e a ordem.
 - **Atualizar agora:** relê as baterias sem fechar o menu. Isso também acontece sozinho a cada minuto.
 - **Iniciar com o Windows.**
 - **Avisar bateria baixa:** mostra uma notificação do Windows quando um aparelho chega a 15% e outra em 5%. Depois de carregar, volta a avisar. Respeita o "Não incomodar". Vem ligado.

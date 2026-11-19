@@ -216,6 +216,9 @@ namespace BatteryTray
         static List<Info> enumCache;
         static DateTime enumAt;
 
+        // aparelho ligado/desligado: a próxima leitura monta a lista de novo
+        public static void InvalidateCache() { lock (enumLock) enumCache = null; }
+
         public static List<Info> Enumerate()
         {
             lock (enumLock)
@@ -344,15 +347,19 @@ namespace BatteryTray
             foreach (var col in collections)
             {
                 var devs = new List<byte>();
+                bool direct = false;
                 bool anyKnown = known.Values.Any(k => k.Path == col.Path);
                 if (rescan || !anyKnown)
                 {
                     var shortCol = ShortCollection(all, col);
                     var slots = new byte[] { 1, 2, 3, 4, 5, 6 };
                     var paired = slots.Where(d => !EmptySlot(shortCol, d)).ToList();
-                    devs.AddRange(paired);
-                    // 0xFF é o aparelho ligado direto (cabo, headset); num receptor (alguma posição vazia) é o próprio receptor
-                    if (paired.Count == slots.Length) devs.Add(0xFF);
+                    // Receptor (Unifying, LIGHTSPEED, Bolt): cada posição pareada é um aparelho; a 0xFF é o próprio receptor.
+                    // Aparelho direto (mouse no cabo, receptor próprio de headset): ele responde em qualquer posição,
+                    // então pergunta primeiro pela 0xFF e para no primeiro que responder (antes, o mouse no cabo virava 7).
+                    bool receiver = paired.Count < slots.Length || (col.Product ?? "").IndexOf("receiver", StringComparison.OrdinalIgnoreCase) >= 0;
+                    if (receiver) devs.AddRange(paired);
+                    else { direct = true; devs.Add(0xFF); devs.AddRange(slots); }
                 }
                 else devs.AddRange(known.Values.Where(k => k.Path == col.Path).Select(k => k.Dev));
 
@@ -381,12 +388,51 @@ namespace BatteryTray
                         if (k.Last == null) k.Last = new Reading { Key = key };
                         k.Last.Name = k.Name; k.Last.Kind = k.Kind;
                         ReadBattery(ch, k);
+                        if (direct) break; // aparelho direto: um só
                     }
                 }
             }
             if (rescan) lastScan = DateTime.UtcNow;
             foreach (var k in known.Values.Where(k => !paths.Contains(k.Path))) k.Last.Online = false;
-            return known.Values.Select(k => k.Last).ToList();
+            return Merge(known.Values.Select(k => k.Last));
+        }
+
+        // O mesmo aparelho pode aparecer por dois caminhos: pelo receptor e pelo cabo (carregando).
+        // Vira um item só, com a leitura de quem está ligado (o cabo, de preferência), sob a chave que o aparelho
+        // usou primeiro, para manter a fixação, o nome curto, a cor e a ordem escolhidos para ele.
+        const string CanonicalKey = @"Software\BatteryTray\Logitech";
+
+        static List<Reading> Merge(IEnumerable<Reading> readings)
+        {
+            var res = new List<Reading>();
+            foreach (var grp in readings.GroupBy(r => (r.Name ?? "") + "|" + r.Kind, StringComparer.OrdinalIgnoreCase))
+            {
+                var list = grp.ToList();
+                if (string.IsNullOrEmpty(list[0].Name) || list[0].Name == "Logitech") { res.AddRange(list); continue; } // sem nome: não dá para juntar
+                string canon = Canonical(list[0].Name, list.Select(r => r.Key).ToList());
+                var best = list.OrderByDescending(r => r.Online).ThenByDescending(r => r.Charging).ThenByDescending(r => r.Updated).First();
+                if (best.Key == canon) { res.Add(best); continue; }
+                res.Add(new Reading { Key = canon, Name = best.Name, Kind = best.Kind, Percent = best.Percent, LevelText = best.LevelText,
+                                      Charging = best.Charging, Online = best.Online, Updated = best.Updated });
+            }
+            return res;
+        }
+
+        // chave guardada para o nome do aparelho; na primeira vez, a do receptor (posição 1..6) se houver
+        static string Canonical(string name, List<string> keys)
+        {
+            try
+            {
+                using (var k = Registry.CurrentUser.CreateSubKey(CanonicalKey))
+                {
+                    var saved = k.GetValue(name) as string;
+                    if (saved != null) return saved;
+                    string pick = keys.FirstOrDefault(x => !x.EndsWith("#255")) ?? keys[0];
+                    k.SetValue(name, pick);
+                    return pick;
+                }
+            }
+            catch { return keys[0]; }
         }
 
         // Canal HID++ "curto" (FF00/0001) do mesmo receptor: é por ele que o receptor responde os erros.
@@ -1395,7 +1441,11 @@ namespace BatteryTray
         const string KeyPath = @"Software\BatteryTray\Aparencia";
         public bool Panel = true;                 // painel na barra (padrão) ou um ícone de bandeja por aparelho
         public bool ShowBar = true, ShowPercent = true, ShowLabels = true;
-        public int Size = 1;                      // 0 compacto, 1 normal, 2 grande
+        public int Size = 1;                      // 0 compacto (só ícone e %), 1 normal, 2 grande
+
+        // o compacto não tem barra nem nome curto, mesmo com as opções ligadas
+        public bool BarOn { get { return ShowBar && Size > 0; } }
+        public bool LabelsOn { get { return ShowLabels && Size > 0; } }
         public readonly Dictionary<string, int> Colors = new Dictionary<string, int>();     // ARGB escolhido pelo usuário
         public readonly Dictionary<string, string> Labels = new Dictionary<string, string>(); // nome curto (ex.: "600")
         public readonly List<string> Order = new List<string>();
@@ -1426,7 +1476,9 @@ namespace BatteryTray
                     if (k == null) return a;
                     a.Panel = (k.GetValue("Modo") as string ?? "painel") != "icones";
                     a.ShowBar = Flag(k, "Barra", true); a.ShowPercent = Flag(k, "Porcentagem", true); a.ShowLabels = Flag(k, "NomesCurtos", true);
-                    object sz = k.GetValue("Tamanho"); if (sz is int) a.Size = Math.Max(0, Math.Min(2, (int)sz));
+                    object sz = k.GetValue("Tamanho2"), old = k.GetValue("Tamanho");
+                    if (sz is int) a.Size = Math.Max(0, Math.Min(2, (int)sz));
+                    else if (old is int) a.Size = (int)old <= 0 ? 1 : 2; // até a v1.5.2: compacto virou normal; normal e grande viraram grande
                     var ord = k.GetValue("Ordem") as string[]; if (ord != null) a.Order.AddRange(ord);
                     foreach (var n in k.GetValueNames())
                     {
@@ -1452,7 +1504,7 @@ namespace BatteryTray
                     k.SetValue("Barra", ShowBar ? 1 : 0, RegistryValueKind.DWord);
                     k.SetValue("Porcentagem", ShowPercent ? 1 : 0, RegistryValueKind.DWord);
                     k.SetValue("NomesCurtos", ShowLabels ? 1 : 0, RegistryValueKind.DWord);
-                    k.SetValue("Tamanho", Size, RegistryValueKind.DWord);
+                    k.SetValue("Tamanho2", Size, RegistryValueKind.DWord);
                     k.SetValue("Ordem", Order.ToArray(), RegistryValueKind.MultiString);
                     foreach (var kv in Colors) k.SetValue("Cor:" + kv.Key, kv.Value, RegistryValueKind.DWord);
                     foreach (var kv in Labels) if (kv.Value != "") k.SetValue("Nome:" + kv.Key, kv.Value);
@@ -1470,7 +1522,7 @@ namespace BatteryTray
         // Cada aparelho é uma grade 2x2:   ícone | porcentagem
         //                                  nome  | barra
         // Sem nome, o ícone fica centralizado na altura; sem barra, a porcentagem também.
-        static readonly float[] IconPx = { 16, 19, 23 }, TextPx = { 13, 15.5f, 18.5f }, LabelPx = { 8.5f, 9.5f, 11f };
+        static readonly float[] IconPx = { 16, 16, 19 }, TextPx = { 13, 13, 15.5f }, LabelPx = { 8.5f, 8.5f, 9.5f };
         const float PadL = 6, Gap = 6, PadR = 8, StackGap = 3;
         const string IconFont = "Segoe Fluent Icons";
 
@@ -1494,7 +1546,7 @@ namespace BatteryTray
             using (var b = new SolidBrush(c)) g.FillPath(b, p);
         }
 
-        static bool HasLabel(Appearance a, Item it) { return a.ShowLabels && !string.IsNullOrEmpty(it.Label); }
+        static bool HasLabel(Appearance a, Item it) { return a.LabelsOn && !string.IsNullOrEmpty(it.Label); }
 
         // Posiciona os itens (X, W) e devolve a largura total. A coluna da porcentagem tem sempre a largura de "100%",
         // para o painel não mudar de tamanho quando o valor muda; a do ícone cresce para caber o nome curto.
@@ -1544,7 +1596,7 @@ namespace BatteryTray
                 // linhas da grade: porcentagem em cima e barra embaixo (sem barra, a porcentagem fica no meio)
                 var rb = reference.GetBounds();
                 float colB = rb.Width, textH = rb.Height;
-                float barH = a.ShowBar ? 3 * s : 0, barGap = a.ShowBar ? 5 * s : 0;
+                float barH = a.BarOn ? 3 * s : 0, barGap = a.BarOn ? 5 * s : 0;
                 float textTop = (h - (textH + barGap + barH)) / 2f, barY = textTop + textH + barGap;
 
                 foreach (var it in items)
@@ -1569,7 +1621,7 @@ namespace BatteryTray
                                 FillAt(g, bp, dev, colBX + tb.Width + 2 * s - bb.X, textTop + (textH - bb.Height) / 2f - bb.Y);
                             }
                     }
-                    if (a.ShowBar)
+                    if (a.BarOn)
                     {
                         using (var track = new SolidBrush(Color.FromArgb(light ? 40 : 55, fg))) g.FillRectangle(track, colBX, barY, colB, barH);
                         float pct = r.Percent < 0 ? 0 : Math.Min(100, r.Percent) / 100f;
@@ -1586,7 +1638,7 @@ namespace BatteryTray
                             {
                                 var lb = lp.GetBounds();
                                 float labelTop;
-                                if (a.ShowBar)
+                                if (a.BarOn)
                                 {
                                     labelTop = barY + barH / 2f - lb.Height / 2f;       // nome na linha da barra
                                     iconTop = Math.Max(2 * s, labelTop - StackGap * s - ib.Height);
@@ -1800,6 +1852,7 @@ namespace BatteryTray
         readonly TableLayoutPanel devTable;
         RadioButton rbPanel, rbIcons;
         readonly List<Control> panelOptions = new List<Control>();
+        CheckBox barCheck, labelCheck;
 
         public AppearanceForm(Appearance look, Func<List<Reading>> devices, Action changed)
         {
@@ -1824,13 +1877,13 @@ namespace BatteryTray
             root.Controls.Add(rbPanel); root.Controls.Add(rbIcons);
 
             root.Controls.Add(Header("Painel"));
-            panelOptions.Add(Check(root, "Barra de bateria embaixo da porcentagem", look.ShowBar, v => look.ShowBar = v));
+            panelOptions.Add(barCheck = Check(root, "Barra de bateria embaixo da porcentagem", look.ShowBar, v => look.ShowBar = v));
             panelOptions.Add(Check(root, "Símbolo % depois do número", look.ShowPercent, v => look.ShowPercent = v));
-            panelOptions.Add(Check(root, "Nomes curtos no ícone (ex.: \"600\")", look.ShowLabels, v => look.ShowLabels = v));
+            panelOptions.Add(labelCheck = Check(root, "Nome curto embaixo do ícone (ex.: \"600\")", look.ShowLabels, v => look.ShowLabels = v));
             var sizeRow = new FlowLayoutPanel { AutoSize = true, Margin = new Padding(0, P(4), 0, 0) };
             sizeRow.Controls.Add(new Label { Text = "Tamanho", AutoSize = true, Margin = new Padding(0, P(6), P(8), 0) });
             var sizes = new List<RadioButton>();
-            foreach (var name in new[] { "Compacto", "Normal", "Grande" })
+            foreach (var name in new[] { "Compacto (só ícone e %)", "Normal", "Grande" })
             {
                 int index = sizes.Count;
                 var rb = new RadioButton { Text = name, AutoSize = true, Checked = look.Size == index, Margin = new Padding(0, P(4), P(12), 0) };
@@ -1840,7 +1893,7 @@ namespace BatteryTray
             root.Controls.Add(sizeRow); panelOptions.Add(sizeRow);
 
             root.Controls.Add(Header("Aparelhos"));
-            root.Controls.Add(new Label { Text = "Clique na cor para trocar. O nome curto aparece no canto do ícone, e as setas mudam a ordem.", AutoSize = true, MaximumSize = new Size(P(460), 0), Tag = "muted", Margin = new Padding(0, 0, 0, P(6)) });
+            root.Controls.Add(new Label { Text = "Clique na cor para trocar. O nome curto aparece embaixo do ícone, e as setas mudam a ordem.", AutoSize = true, MaximumSize = new Size(P(460), 0), Tag = "muted", Margin = new Padding(0, 0, 0, P(6)) });
             devTable = new TableLayoutPanel { ColumnCount = 5, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink };
             root.Controls.Add(devTable);
             BuildDevices();
@@ -1958,7 +2011,12 @@ namespace BatteryTray
             preview.Invalidate();
         }
 
-        void UpdateEnabled() { foreach (var c in panelOptions) c.Enabled = look.Panel; }
+        // o compacto não tem barra nem nome curto: essas opções ficam desativadas nele
+        void UpdateEnabled()
+        {
+            foreach (var c in panelOptions) c.Enabled = look.Panel;
+            barCheck.Enabled = labelCheck.Enabled = look.Panel && look.Size > 0;
+        }
 
         // cores do tema do Windows (claro/escuro); amostras de cor ("swatch") ficam com a cor do aparelho
         void Theme(Control c)
@@ -2021,7 +2079,7 @@ namespace BatteryTray
         readonly Dictionary<string, Entry> entries = new Dictionary<string, Entry>();
         readonly int taskbarCreated;
         public readonly IntPtr Blank;
-        public Action LeftClick, RightClick, Recreated, NotificationClick;
+        public Action LeftClick, RightClick, Recreated, NotificationClick, DevicesChanged;
 
         public TrayIcons()
         {
@@ -2159,6 +2217,13 @@ namespace BatteryTray
 
         protected override void WndProc(ref Message m)
         {
+            // WM_DEVICECHANGE: o Windows avisa todas as janelas quando um aparelho é ligado ou desligado
+            // (DBT_DEVNODES_CHANGED 0x7, DBT_DEVICEARRIVAL 0x8000, DBT_DEVICEREMOVECOMPLETE 0x8004)
+            if (m.Msg == 0x219)
+            {
+                long w = (long)m.WParam;
+                if ((w == 0x7 || w == 0x8000 || w == 0x8004) && DevicesChanged != null) DevicesChanged();
+            }
             if (m.Msg == taskbarCreated && taskbarCreated != 0)
             {
                 foreach (var e in entries.Values) e.Added = false; // Explorer reiniciou: recria tudo
@@ -2482,7 +2547,7 @@ namespace BatteryTray
     static class Updater
     {
         // Ao publicar uma versão nova, mude este número e crie a tag "v" + número (veja release.ps1).
-        public const string Version = "1.5.1";
+        public const string Version = "1.5.2";
         const string Repo = "HenriqueGomez/BatteryTray";
         const string Agent = "BatteryTray-Updater";
 
@@ -3009,6 +3074,7 @@ namespace BatteryTray
             tray.LeftClick = RefreshNow;
             tray.RightClick = ShowMenu;
             tray.NotificationClick = NotificationClicked;
+            tray.DevicesChanged = OnDevicesChanged;
             tray.Recreated = () => { iconSig.Clear(); Layout(); };
             layoutTimer = new System.Windows.Forms.Timer { Interval = 2000 };
             layoutTimer.Tick += (s, e) => Layout();
@@ -3026,6 +3092,32 @@ namespace BatteryTray
         }
 
         public void RefreshNow() { ThreadPool.QueueUserWorkItem(_ => Tick()); }
+
+        // Aparelho ligado ou desligado (ex.: o cabo de carregar): relê logo depois e de novo alguns segundos mais tarde,
+        // porque um mouse que acabou de entrar no cabo ainda está se apresentando ao Windows.
+        // Os avisos vêm em rajadas; o temporizador junta os de um mesmo momento numa leitura só.
+        System.Windows.Forms.Timer deviceTimer, deviceLaterTimer;
+        void OnDevicesChanged()
+        {
+            if (deviceTimer == null)
+            {
+                deviceTimer = new System.Windows.Forms.Timer { Interval = 1500 };
+                deviceTimer.Tick += (s, e) => { deviceTimer.Stop(); RefreshAfterChange(); deviceLaterTimer.Stop(); deviceLaterTimer.Start(); };
+                deviceLaterTimer = new System.Windows.Forms.Timer { Interval = 6000 };
+                deviceLaterTimer.Tick += (s, e) => { deviceLaterTimer.Stop(); RefreshAfterChange(); };
+            }
+            deviceTimer.Stop(); deviceTimer.Start();
+        }
+
+        void RefreshAfterChange()
+        {
+            Hid.InvalidateCache();
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                while (Volatile.Read(ref busy) != 0) Thread.Sleep(100); // espera a leitura em andamento terminar
+                Tick();
+            });
+        }
 
         // "Atualizar agora" no menu: o menu fica aberto, mostra "Atualizando..." e os valores mudam ali mesmo.
         string refreshStatus;
@@ -3270,7 +3362,8 @@ namespace BatteryTray
 
         protected override void ExitThreadCore()
         {
-            poll.Dispose(); layoutTimer.Stop(); watchTimer.Stop(); if (updateTimer != null) updateTimer.Dispose();
+            poll.Dispose(); layoutTimer.Stop(); watchTimer.Stop();
+            if (deviceTimer != null) { deviceTimer.Stop(); deviceLaterTimer.Stop(); } if (updateTimer != null) updateTimer.Dispose();
             foreach (var o in overlays.Values) o.Dispose();
             panel.Dispose();
             if (appearanceForm != null && !appearanceForm.IsDisposed) appearanceForm.Dispose();
