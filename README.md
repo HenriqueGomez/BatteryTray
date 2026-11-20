@@ -52,13 +52,28 @@ O menu abre com o clique direito no painel (ou em qualquer aparelho, no modo de 
 | **USB/HID genérico** | Campo de bateria padrão HID (`Battery Strength` ou `Remaining Capacity`). |
 | **Controles XInput** | Quando o controle informa a bateria. |
 
+### Outras marcas (a maioria ainda não testada)
+
+Estes aparelhos usam protocolos documentados por projetos abertos que já leem essas baterias, como [HeadsetControl](https://github.com/Sapd/HeadsetControl), [rivalcfg](https://github.com/flozz/rivalcfg), [G-Helper](https://github.com/seerge/g-helper), [ckb-next](https://github.com/ckb-next/ckb-next), [mxw](https://github.com/korkje/mxw), o [SDL](https://github.com/libsdl-org/SDL) e os drivers do Linux. O BatteryTray usa só os fatos desses protocolos (quais bytes cada aparelho entende), com código próprio. Ele manda apenas pedidos de leitura, e só para os modelos da lista: nunca comandos que gravam configurações ou atualizam o firmware.
+
+Fora o HyperX Cloud III Wireless, nenhum deles foi testado com o BatteryTray, então algum pode não aparecer ou mostrar a bateria errada. Nesse caso, [abra uma *issue*](#um-aparelho-não-aparece) com o diagnóstico: ele mostra a resposta de cada um.
+
+| Tipo | Aparelhos |
+|---|---|
+| **Headsets** | **HyperX** Cloud III Wireless, Cloud II Wireless, Cloud II Core Wireless, Cloud Alpha Wireless, Cloud Alpha 2 Wireless, Cloud Flight, Cloud Flight S, Cloud Stinger Core Wireless · **SteelSeries** Arctis 1, 7, 7P, 7X, 9, Pro Wireless, 7+, Nova 3P/3X, Nova 5/5X, Nova 7 (todas as versões), Nova Pro Wireless, GameBuds · **Corsair** Void, Void Pro, Void Elite, HS70, HS80, Virtuoso XT/SE, Void Wireless v2, Virtuoso MAX, HS80 MAX · **JBL** Quantum 520, 650, 850 e 950 · **Sony** INZONE H9 II e H5 · **Audeze** Maxwell e Maxwell 2 · **ASTRO** A50 (4ª e 5ª geração) · **Logitech** G535 |
+| **Mouses** | **SteelSeries** Aerox 3/5/9 Wireless, Prime Wireless, Prime Mini Wireless, Rival 3 Wireless, Rival 650 · **ASUS ROG/TUF** Keris, Gladius II/III, Chakram, Harpe, Pugio II, Spatha X, Strix Impact II, Strix Carry, TUF M4 · **Glorious** Model O/O-/D/D- Wireless · **Receptores CompX e Areson** (VXE, ATK, Pulsar, Lamzu, Redragon M719/M913/M915, Ajazz, Fantech) · **Corsair** Dark Core, Ironclaw, Harpoon, M65 Ultra, M75 · **HyperX** Pulsefire Dart, Pulsefire Haste 2 · **Keychron** M5 e M6 |
+| **Teclados** | **ASUS ROG** Azoth, Strix Scope II 96, Falchion · **Corsair** K57 Wireless, K63 Wireless, K70 Pro Mini Wireless |
+| **Controles** | **Sony** DualSense, DualSense Edge e DualShock 4 · **Nintendo** Switch Pro Controller, Joy-Con e controles do Switch Online · **8BitDo** Ultimate 3 (modo D-input) |
+
+**Controles da Sony e da Nintendo:** o app só escuta o que o controle já manda. No cabo, a bateria vem sempre. Pelo Bluetooth, o DualSense, o DualShock 4 e os controles do Switch só mandam a bateria depois que algum programa, como o Steam ou um jogo, liga o modo completo. Pedir isso daqui mudaria o modo do controle até ele reconectar e atrapalharia jogos antigos, então, sem esse programa aberto, o controle não aparece.
+
 **Não funciona com:**
-- dongles 2.4 GHz que usam protocolo próprio da marca;
+- dongles 2.4 GHz com protocolo próprio da marca que não estão nas listas acima;
 - controles cujo receptor se apresenta ao Windows como "com fio" (por exemplo, o dongle da 8BitDo);
 - headsets cujo receptor 2.4 GHz não transmite a bateria, como o **Baseus AeQur GH02** (receptor `10D6:4802`, chip da Actions). Pelo Bluetooth, ele aparece se o Windows mostrar a bateria em *Configurações → Bluetooth e dispositivos*;
 - aparelhos Logitech que só informam a tensão: nesse caso a porcentagem é uma **estimativa**.
 
-**Testado com:** Logitech G502 X PLUS, Razer Kraken V3 Pro, GameSir Cyclone 2, Delux M900 Pro (receptor 2.4G) e MCHOSE V9 Turbo+. Outros aparelhos usam os mesmos protocolos, mas podem se comportar diferente.
+**Testado com:** Logitech G502 X PLUS, Razer Kraken V3 Pro, GameSir Cyclone 2, Delux M900 Pro (receptor 2.4G), MCHOSE V9 Turbo+ e HyperX Cloud III Wireless. Outros aparelhos usam os mesmos protocolos, mas podem se comportar diferente.
 
 ### Um aparelho não aparece?
 
@@ -73,7 +88,7 @@ Se o app nem abrir, rode `BatteryTray.exe --diagnostico` no terminal, na pasta d
 ## Privacidade e o que o app acessa
 
 - **Internet:** só o `api.github.com` e os downloads deste repositório, para verificar e baixar atualizações. Isso acontece ao abrir, a cada 6 horas ou quando você pede pelo menu. Nenhum dado seu é enviado, além do que qualquer acesso à internet já revela (como o seu IP para o GitHub).
-- **Aparelhos:** lê a bateria conversando direto com receptores Logitech e Razer (somente comandos de leitura) e com as propriedades de dispositivos do Windows.
+- **Aparelhos:** lê a bateria conversando direto com os aparelhos e receptores das marcas da lista acima (somente pedidos de leitura, e só para os modelos conhecidos) e com as propriedades de dispositivos do Windows.
 - **Arquivos:** lê os logs do Razer Synapse em `%LOCALAPPDATA%\Razer\RazerAppEngine\User Data\Logs`. Só grava o arquivo de diagnóstico quando você pede, e ele não é enviado a lugar nenhum.
 - **Registro do Windows, só no seu usuário:**
   - `HKCU\Software\BatteryTray` guarda os aparelhos ocultos, a identificação de cada ícone, se o aviso de bateria baixa está ligado, a última versão nova avisada e a aparência escolhida em **Personalizar...**;

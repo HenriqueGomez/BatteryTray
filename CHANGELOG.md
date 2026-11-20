@@ -12,6 +12,17 @@ Como usar (mantenedor):
 
 ## [Não publicado]
 
+## [1.7.0] - 2026-11-19
+
+### Novidades
+- **Muito mais marcas**, com protocolos documentados por projetos abertos (HeadsetControl, rivalcfg, G-Helper, ckb-next, mxw, SDL e outros). Só o HyperX Cloud III Wireless já foi testado com o BatteryTray; se algum outro não aparecer, mande o diagnóstico numa *issue*.
+  - **Headsets:** HyperX (Cloud III, Cloud II, Cloud II Core, Cloud Alpha, Cloud Alpha 2, Cloud Flight, Cloud Stinger Core), SteelSeries (Arctis 1, 7, 9, Pro, 7+ e toda a linha Nova), Corsair (Void, HS70, HS80, Virtuoso, Void v2, HS80 MAX), JBL Quantum, Sony INZONE, Audeze Maxwell, ASTRO A50 e Logitech G535.
+  - **Mouses:** SteelSeries Aerox, Prime e Rival, ASUS ROG e TUF, Glorious Model O/D, mouses com receptor CompX ou Areson (VXE, ATK, Pulsar, Lamzu, Redragon, Ajazz, Fantech), Corsair Dark Core, Ironclaw, Harpoon e M75, HyperX Pulsefire Dart e Haste 2, Keychron M5 e M6.
+  - **Teclados:** ASUS ROG Azoth, Strix Scope II 96 e Falchion; Corsair K57, K63 e K70 Pro Mini Wireless.
+  - **Controles:** DualSense, DualSense Edge, DualShock 4, controles do Switch e 8BitDo Ultimate 3. Pelo Bluetooth, os da Sony e da Nintendo só aparecem com o Steam ou um jogo aberto, que liga o modo em que o controle manda a bateria.
+- O app só manda pedidos de leitura, e só para os modelos da lista. Comandos que gravam configurações ou atualizam o firmware nunca são enviados.
+- O diagnóstico mostra a resposta de cada um desses aparelhos.
+
 ## [1.6.1] - 2026-11-19
 
 ### Correções

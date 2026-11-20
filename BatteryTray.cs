@@ -7,6 +7,9 @@
 //  - Bluetooth de qualquer marca: bateria guardada pelo Windows nas propriedades do dispositivo
 //  - USB/HID genérico: campo de bateria padrão (Battery Strength / Remaining Capacity)
 //  - Controles XInput que informam bateria
+//  - GameSir, receptores Beken "2.4G 8K" e headsets MCHOSE: protocolos próprios
+//  - HyperX, SteelSeries, Corsair, ASUS ROG, Glorious, receptores CompX (VXE, ATK, Pulsar, Redragon), JBL, Sony INZONE,
+//    Audeze, ASTRO, Keychron, DualSense/DualShock 4, controles do Switch e 8BitDo: veja VendorFamilies
 // Atualização: consulta o último Release do GitHub (veja Updater e release.ps1).
 // Compilar com build.cmd (usa o csc do .NET Framework 4, que já vem no Windows). Licença MIT.
 using System;
@@ -133,6 +136,19 @@ namespace BatteryTray
                               + (others > 0 ? "; chegaram " + others + " quadro(s) de outro tipo, o primeiro: " + firstOther : "");
                     return null;
                 }
+            }
+        }
+
+        // Só envia um relatório de saída (completado com zeros até o tamanho da coleção).
+        public static bool Write(Info info, byte[] request)
+        {
+            using (var h = CreateFile(info.Path, 0xC0000000, 3, IntPtr.Zero, 3, 0, IntPtr.Zero))
+            {
+                if (h.IsInvalid) return false;
+                int outLen = Math.Max((int)info.OutLen, request.Length);
+                var req = new byte[outLen]; Array.Copy(request, req, request.Length);
+                try { using (var fs = new FileStream(h, FileAccess.ReadWrite, 1, false)) { fs.Write(req, 0, outLen); fs.Flush(); } return true; }
+                catch (IOException) { return false; }
             }
         }
 
@@ -381,7 +397,9 @@ namespace BatteryTray
             // canal HID++ "longo": receptores/aparelhos comuns (FF00/0002) e aparelhos G mais novos, como headsets (FF43/0202)
             var all = Hid.Enumerate();
             var collections = all.Where(i => i.Vid == 0x046D &&
-                ((i.UsagePage == 0xFF00 && i.Usage == 0x0002) || (i.UsagePage == 0xFF43 && i.Usage == 0x0202))).ToList();
+                ((i.UsagePage == 0xFF00 && i.Usage == 0x0002) || (i.UsagePage == 0xFF43 && i.Usage == 0x0202)
+                 // headset G535: o canal HID++ fica na coleção de mídia (000C/0001) da interface 3 (fonte: HeadsetControl)
+                 || (i.Pid == 0x0AC4 && i.UsagePage == 0x000C && i.Usage == 0x0001 && i.InLen == 20 && i.OutLen == 20 && VendorSource.Mi(i) == 3))).ToList();
             bool rescan = (DateTime.UtcNow - lastScan).TotalMinutes >= 5;
             var paths = new HashSet<string>(collections.Select(c => c.Path));
 
@@ -607,7 +625,7 @@ namespace BatteryTray
             { 4186, 100 }, { 4067, 90 }, { 3989, 80 }, { 3922, 70 }, { 3859, 60 }, { 3811, 50 },
             { 3778, 40 }, { 3751, 30 }, { 3717, 20 }, { 3671, 10 }, { 3646, 5 }, { 3579, 2 }, { 3500, 0 } };
 
-        static int PercentFromMillivolts(int mv)
+        internal static int PercentFromMillivolts(int mv)
         {
             if (mv >= VoltageCurve[0, 0]) return 100;
             for (int i = 1; i < VoltageCurve.GetLength(0); i++)
@@ -1110,6 +1128,1045 @@ namespace BatteryTray
         }
     }
 
+    // ------------------------------------------------------------------ Famílias de aparelhos de outras marcas
+    // Protocolos documentados por projetos abertos; daqui só vêm os fatos (quais bytes cada aparelho entende), e o código
+    // é deste projeto. Cada família cita de onde veio.
+    static class VendorFamilies
+    {
+        static Dictionary<ushort, string> M(params object[] kv)
+        {
+            var d = new Dictionary<ushort, string>();
+            for (int i = 0; i + 1 < kv.Length; i += 2) d[(ushort)(int)kv[i]] = (string)kv[i + 1];
+            return d;
+        }
+
+        // quadro que começa com estes bytes (-1 = qualquer valor)
+        static Func<byte[], bool> Starts(params int[] head)
+        {
+            return f => { if (f.Length < head.Length) return false; for (int i = 0; i < head.Length; i++) if (head[i] >= 0 && f[i] != head[i]) return false; return true; };
+        }
+
+        static VendorSource.Result Ok(int pct, bool charging) { return new VendorSource.Result { Percent = pct, Charging = charging }; }
+        static readonly VendorSource.Result Off = new VendorSource.Result { Online = false };
+        static byte[] B(params int[] b) { return b.Select(x => (byte)x).ToArray(); }
+
+        public static List<VendorSource.Family> All()
+        {
+            var l = new List<VendorSource.Family>();
+            Headsets(l);
+            Mice(l);
+            Controllers(l);
+            return l;
+        }
+
+        // ---------------------------------------------------------------- mouses e teclados
+        // Fontes: rivalcfg (SteelSeries, WTFPL), G-Helper e rog-battery-tray (ASUS), mxw (Glorious, MIT), ckb-next e OpenRGB
+        // (Corsair), vxe-battery-tray, atk-mouse-battery, PulsarBattery e AreYouLowBattery (receptores CompX, MIT),
+        // hyperx_pulsefire_dart_reverse_engineering (HyperX Dart), keychron-battery-dkms (Keychron) e BatteryHub (krisgfx9).
+        static void Mice(List<VendorSource.Family> l)
+        {
+            // SteelSeries Aerox / Prime Wireless: 00 92 (no cabo) ou 00 D2 (pelo receptor) -> eco do comando no byte 1,
+            // byte 2: bit 7 = carregando, ((v & 0x7F) - 1) * 5 = %; 0 = desligado; 40 FF = receptor sem o mouse
+            var aeroxWired = new HashSet<ushort> { 0x183A, 0x187A, 0x1854, 0x185E, 0x1862, 0x185A, 0x1876, 0x1842, 0x184A };
+            l.Add(new VendorSource.Family {
+                Id = "steelseries", Label = "SteelSeries", Kind = DeviceKind.Mouse, Vid = 0x1038,
+                Models = M(0x183A, "Aerox 3 Wireless", 0x1838, "Aerox 3 Wireless", 0x187A, "Aerox 3 Wireless", 0x1878, "Aerox 3 Wireless",
+                           0x1854, "Aerox 5 Wireless", 0x1852, "Aerox 5 Wireless", 0x185E, "Aerox 5 Wireless", 0x185C, "Aerox 5 Wireless",
+                           0x1862, "Aerox 5 Wireless", 0x1860, "Aerox 5 Wireless", 0x185A, "Aerox 9 Wireless", 0x1858, "Aerox 9 Wireless",
+                           0x1876, "Aerox 9 Wireless", 0x1874, "Aerox 9 Wireless", 0x1842, "Prime Wireless", 0x1840, "Prime Wireless",
+                           0x184A, "Prime Mini Wireless", 0x1848, "Prime Mini Wireless"),
+                Collection = i => VendorSource.Mi(i) == 3 && i.OutLen > 0,
+                Read = c =>
+                {
+                    int cmd = aeroxWired.Contains(c.Pid) ? 0x92 : 0xD2;
+                    Func<byte[], bool> ok = x => x.Length > 2 && (x[1] == cmd || (x[1] == 0x40 && x[2] == 0xFF));
+                    var f = c.Ask(B(0x00, cmd), ok, 600) ?? c.Ask(B(0x00, cmd), ok, 600); // o SteelSeries GG às vezes "rouba" a resposta
+                    if (f == null) return null;
+                    int v = f[2] & 0x7F;
+                    if (f[1] == 0x40 || v == 0) return Off;
+                    return v <= 21 ? Ok((v - 1) * 5, (f[2] & 0x80) != 0) : new VendorSource.Result();
+                }
+            });
+            // SteelSeries Aerox 3 Wireless Gen 2: mesmo pedido; byte 2 = 0 na bateria, 1 carregando, 2 carregado; byte 3 = %
+            l.Add(new VendorSource.Family {
+                Id = "steelseries", Label = "SteelSeries", Kind = DeviceKind.Mouse, Vid = 0x1038,
+                Models = M(0x1892, "Aerox 3 Wireless Gen 2", 0x1890, "Aerox 3 Wireless Gen 2"),
+                Collection = i => VendorSource.Mi(i) == 3 && i.OutLen > 0,
+                Read = c =>
+                {
+                    int cmd = c.Pid == 0x1892 ? 0x92 : 0xD2;
+                    var f = c.Ask(B(0x00, cmd), x => x.Length > 3 && x[1] == cmd, 1000);
+                    if (f == null) return null;
+                    if (f[2] == 0 && f[3] == 0 && c.Pid == 0x1890) return Off;
+                    if (f[2] == 2) return Ok(100, false);
+                    return Ok(f[3] <= 100 ? f[3] : -1, f[2] == 1);
+                }
+            });
+            // SteelSeries Rival 3 Wireless / Gen 2 / Rival 650: 00 AA 01 -> byte 1 = %, byte 3 = carregando
+            l.Add(new VendorSource.Family {
+                Id = "steelseries", Label = "SteelSeries", Kind = DeviceKind.Mouse, Vid = 0x1038,
+                Models = M(0x1830, "Rival 3 Wireless", 0x1872, "Rival 3 Wireless Gen 2", 0x172B, "Rival 650 Wireless", 0x1726, "Rival 650 Wireless"),
+                Collection = i => VendorSource.Mi(i) == (i.Pid == 0x172B || i.Pid == 0x1726 ? 0 : 3) && i.OutLen > 0,
+                Read = c =>
+                {
+                    var f = c.Ask(B(0x00, 0xAA, 0x01), x => x.Length > 3 && x[1] <= 100, 1000);
+                    return f == null ? null : Ok(f[1], f[3] != 0);
+                }
+            });
+
+            // ASUS ROG / TUF: [rid] 12 07 -> eco 12 07; byte 5 = % (ou nível 0-4 em alguns), byte 10 = carregando; FF AA = mouse dormindo
+            var asusGauge = new HashSet<ushort> { 0x18E5, 0x18E3, 0x1960, 0x195E, 0x1A59, 0x1A57, 0x1908, 0x1906, 0x1949, 0x1947, 0x18B4, 0x18A0 };
+            l.Add(new VendorSource.Family {
+                Id = "asus", Label = "ASUS", Kind = DeviceKind.Mouse, Vid = 0x0B05,
+                Models = M(0x18E5, "ROG Chakram", 0x18E3, "ROG Chakram", 0x1A1A, "ROG Chakram X", 0x1A18, "ROG Chakram X",
+                           0x197F, "ROG Gladius III Wireless", 0x197D, "ROG Gladius III Wireless", 0x1A72, "ROG Gladius III Aimpoint", 0x1A70, "ROG Gladius III Aimpoint",
+                           0x1B0C, "ROG Gladius III Aimpoint EVA-02", 0x1B0A, "ROG Gladius III Aimpoint EVA-02", 0x1A94, "ROG Harpe Ace Aim Lab", 0x1A92, "ROG Harpe Ace Aim Lab",
+                           0x1B67, "ROG Harpe Ace Extreme", 0x1960, "ROG Keris Wireless", 0x195E, "ROG Keris Wireless", 0x1A59, "ROG Keris Wireless EVA", 0x1A57, "ROG Keris Wireless EVA",
+                           0x1A68, "ROG Keris Wireless Aimpoint", 0x1A66, "ROG Keris Wireless Aimpoint", 0x1B16, "ROG Keris II Ace", 0x1908, "ROG Pugio II", 0x1906, "ROG Pugio II",
+                           0x1979, "ROG Spatha X", 0x1977, "ROG Spatha X", 0x1949, "ROG Strix Impact II Wireless", 0x1947, "ROG Strix Impact II Wireless",
+                           0x19F4, "TUF Gaming M4 Wireless", 0x1A8D, "ROG TX Gaming Mouse", 0x1AF5, "ROG TX Mini", 0x1AF3, "ROG TX Mini",
+                           0x1C57, "TUF Gaming Mini Miku", 0x1C56, "TUF Gaming Mini Miku", 0x1B63, "ROG Harpe Ace Mini", 0x1C69, "ROG Harpe II Ace",
+                           0x1C0C, "ROG Keris II Origin", 0x1D4C, "ROG Keris II Origin", 0x18B4, "ROG Strix Carry", 0x18A0, "ROG Gladius II Wireless"),
+                Collection = i => VendorSource.Mi(i) == (i.Pid == 0x18B4 ? 1 : i.Pid == 0x18A0 ? 2 : 0) && i.OutLen >= 64,
+                Read = c =>
+                {
+                    var f = c.Ask(B(0x00, 0x12, 0x07), x => x.Length > 10 && x[0] == 0x00 && ((x[1] == 0x12 && x[2] == 0x07) || (x[1] == 0xFF && x[2] == 0xAA)), 500);
+                    if (f == null) return null;
+                    if (f[1] == 0xFF) return Off;
+                    int raw = c.Pid == 0x18B4 ? f[7] : f[5];
+                    int pct = asusGauge.Contains(c.Pid) ? raw * 25 : raw;
+                    bool charging = f[10] != 0;
+                    if (pct == 0 && !charging) return Off; // receptor sem o mouse
+                    return Ok(Math.Min(100, pct), charging);
+                }
+            });
+            // Teclados ASUS ROG: 00 12 01 -> eco 12 01; byte 6 = % (byte 11 no Falchion), byte 9 = 1 carregando
+            var falchion = new HashSet<ushort> { 0x193C, 0x193E };
+            l.Add(new VendorSource.Family {
+                Id = "asus", Label = "ASUS", Kind = DeviceKind.Keyboard, Vid = 0x0B05,
+                Models = M(0x1A83, "ROG Azoth", 0x1A85, "ROG Azoth", 0x1B3F, "ROG Azoth Extreme", 0x1CEF, "ROG Azoth Extreme SE", 0x1C24, "ROG Azoth X", 0x1C25, "ROG Azoth X",
+                           0x1AAE, "ROG Strix Scope II 96 Wireless", 0x1B78, "ROG Strix Scope II 96 RX Wireless", 0x193C, "ROG Falchion", 0x193E, "ROG Falchion"),
+                Collection = i => VendorSource.Mi(i) == 1 && i.OutLen >= 64,
+                Read = c =>
+                {
+                    var f = c.Ask(B(0x00, 0x12, 0x01), x => x.Length > 11 && x[0] == 0x00 && ((x[1] == 0x12 && x[2] == 0x01) || (x[1] == 0xFF && x[2] == 0xAA)), 500);
+                    if (f == null) return null;
+                    if (f[1] == 0xFF) return Off;
+                    int pct = falchion.Contains(c.Pid) ? f[11] : f[6];
+                    return pct <= 100 ? Ok(pct, f[9] == 1) : new VendorSource.Result();
+                }
+            });
+
+            // Glorious Model O / O- / D / D- Wireless: "feature" 00 00 00 02 02 00 83 -> byte 6 = 83, byte 1: A1 acordado, A4 dormindo;
+            // byte 8 = %, byte 7 = 1 carregando (no cabo, sempre carregando)
+            var gloriousWired = new HashSet<ushort> { 0x2011, 0x2012, 0x2013, 0x2014 };
+            l.Add(new VendorSource.Family {
+                Id = "glorious", Label = "Glorious", Kind = DeviceKind.Mouse, Vid = 0x258A,
+                Models = M(0x2011, "Glorious Model O Wireless", 0x2022, "Glorious Model O Wireless", 0x2013, "Glorious Model O- Wireless", 0x2024, "Glorious Model O- Wireless",
+                           0x2012, "Glorious Model D Wireless", 0x2023, "Glorious Model D Wireless", 0x2014, "Glorious Model D- Wireless", 0x2025, "Glorious Model D- Wireless"),
+                Collection = i => VendorSource.Mi(i) == 2 && i.FeatLen == 65,
+                Read = c =>
+                {
+                    var f = c.Feature(B(0x00, 0x00, 0x00, 0x02, 0x02, 0x00, 0x83), x => x[6] == 0x83 && (x[1] == 0xA1 || x[1] == 0xA4), 100, 5, 0x00);
+                    if (f == null) return null;
+                    if (f[1] == 0xA4) return Off;
+                    return f[8] <= 100 ? Ok(Math.Max(1, (int)f[8]), f[7] == 0x01 || gloriousWired.Contains(c.Pid)) : new VendorSource.Result();
+                }
+            });
+
+            // Receptores CompX/Nordic (VXE, ATK, Pulsar, Redragon, Lamzu): relatório 08 de 17 bytes com soma 0x55,
+            // 08 04 ... 49 -> 08 04; byte 6 = %, byte 7: 0 na bateria, 1 carregando, 2 carregado. Carregando, a % fica parada ou
+            // pula para um valor fixo, então o app mantém a última.
+            Func<byte[], VendorSource.Result> compx = f =>
+            {
+                if (f[7] == 2) return Ok(100, false);
+                if (f[7] == 1) return Ok(-1, true);
+                if (f[6] == 0) return Off; // mouse dormindo ou fora de alcance
+                return f[6] <= 100 ? Ok(f[6], false) : new VendorSource.Result();
+            };
+            var compxReq = B(0x08, 0x04, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x49);
+            Func<Hid.Info, bool> compxCol = i => i.UsagePage == 0xFF02 && i.InLen == 17 && i.OutLen == 17;
+            Func<VendorSource.Ctx, VendorSource.Result> compxRead = c =>
+            {
+                var f = c.Ask(compxReq, x => x.Length >= 17 && x[0] == 0x08 && x[1] == 0x04, 1000);
+                return f == null ? null : compx(f);
+            };
+            l.Add(new VendorSource.Family {
+                Id = "compx", Label = "Receptor CompX", Kind = DeviceKind.Mouse, Vid = 0x3554, AnyPid = true,
+                Models = M(0xF58F, "VXE R1 SE", 0xF55E, "Redragon M719 Pro", 0xF5D5, "Redragon M719 Pro"),
+                Collection = compxCol, Read = compxRead });
+            l.Add(new VendorSource.Family {
+                Id = "compx", Label = "Receptor CompX", Kind = DeviceKind.Mouse, Vid = 0x373B,
+                Models = M(0x1085, "VXE R1 SE", 0x10C9, "ATK U2 Plus", 0x126C, "ATK U2 Plus"),
+                Collection = compxCol, Read = compxRead });
+            l.Add(new VendorSource.Family {
+                Id = "pulsar", Label = "Pulsar", Kind = DeviceKind.Mouse, Vid = 0x3710, AnyPid = true,
+                Models = M(), Collection = compxCol, Read = compxRead });
+            // Receptores Areson (25A7: Ajazz, Pulsar X2 V1, Fantech, Redragon M913/M915): o pedido vai por "feature" na coleção
+            // FF02 e a resposta (09 04) chega em outra coleção, FF01, que precisa estar aberta antes. M913/M915 contam 0-10.
+            var areson10 = new HashSet<ushort> { 0xFA07, 0xFA08 };
+            l.Add(new VendorSource.Family {
+                Id = "compx", Label = "Receptor Areson", Kind = DeviceKind.Mouse, Vid = 0x25A7,
+                Models = M(0xFA7C, null, 0xFA7B, null, 0xFA07, "Redragon M913", 0xFA08, "Redragon M915 RGB"),
+                Collection = i => i.UsagePage == 0xFF02 && i.Usage == 0x0002 && i.FeatLen >= 17,
+                Read = c =>
+                {
+                    int mi = VendorSource.Mi(c.Info);
+                    var reply = c.Other(i => i.UsagePage == 0xFF01 && i.Usage == 0x0000 && i.InLen >= 17 && VendorSource.Mi(i) == mi);
+                    var f = c.AskOther(reply, compxReq, true, x => x.Length >= 17 && x[0] == 0x09 && x[1] == 0x04, 1500);
+                    if (f == null) return null;
+                    if (areson10.Contains(c.Pid) && f[7] == 0) return f[6] == 0 ? Off : f[6] <= 10 ? Ok(f[6] * 10, false) : new VendorSource.Result();
+                    return compx(f);
+                }
+            });
+
+            // Corsair "Bragi" (mouses e teclados Slipstream): 00 <08|filho> 02 <prop> -> byte 2 = 02, byte 3 = estado (0 ok),
+            // valor LE a partir do byte 4. Propriedade 36 no receptor = quais filhos estão ligados; 0F = bateria 0-1000; 10 = 1 carregando,
+            // 3 carregado. Só leitura: o app nunca troca o aparelho para o "modo software".
+            Func<VendorSource.Ctx, int, int, int> bragi = (c, child, prop) =>
+            {
+                var f = c.Ask(B(0x00, 0x08 | child, 0x02, prop), x => x.Length > 6 && x[2] == 0x02 && (x[1] & 0x07) == child, 500);
+                if (f == null) return -2;
+                if (f[3] != 0x00) return -1;
+                return f[4] | f[5] << 8 | f[6] << 16;
+            };
+            var corsairDongles = new HashSet<ushort> { 0x1B66, 0x1B81, 0x1B7F, 0x1B65, 0x1B62, 0x1BDC, 0x2B00, 0x1BD3, 0x1BA6 };
+            l.Add(new VendorSource.Family {
+                Id = "corsair", Label = "Corsair", Kind = DeviceKind.Mouse, Vid = 0x1B1C,
+                Models = M(0x1B4C, "Corsair Ironclaw RGB Wireless", 0x1B66, "Corsair Ironclaw RGB Wireless", 0x1B80, "Corsair Dark Core RGB Pro", 0x1B81, "Corsair Dark Core RGB Pro",
+                           0x1B7E, "Corsair Dark Core RGB Pro SE", 0x1B7F, "Corsair Dark Core RGB Pro SE", 0x1B5E, "Corsair Harpoon RGB Wireless", 0x1B65, "Corsair Harpoon RGB Wireless",
+                           0x1B62, "Corsair K57 RGB Wireless", 0x1BF1, "Corsair M75 Wireless", 0x1BDC, "Corsair M75 Wireless", 0x2B32, "Corsair Ironclaw Wireless SE", 0x2B00, "Corsair Ironclaw Wireless SE",
+                           0x1BB5, "Corsair M65 Ultra Wireless", 0x1BB6, "Corsair K70 Pro Mini Wireless", 0x1BD3, "Corsair K70 Pro Mini Wireless", 0x1BA6, null,
+                           0x1B4B, "Corsair Dark Core RGB SE"),
+                Kinds = new Dictionary<ushort, DeviceKind> { { 0x1B62, DeviceKind.Keyboard }, { 0x1BB6, DeviceKind.Keyboard }, { 0x1BD3, DeviceKind.Keyboard } },
+                Collection = i => VendorSource.Mi(i) == 1 && i.UsagePage == 0xFF42 && i.OutLen >= 64,
+                Read = c =>
+                {
+                    int child = 0;
+                    if (corsairDongles.Contains(c.Pid))
+                    {
+                        int bits = bragi(c, 0, 0x36);
+                        if (bits == -2) return null;
+                        if (bits < 0) return new VendorSource.Result();
+                        for (int i = 1; i <= 7 && child == 0; i++) if ((bits & (1 << i)) != 0) child = i;
+                        if (child == 0) return Off; // receptor sem aparelho ligado
+                    }
+                    int v = bragi(c, child, 0x0F);
+                    if (v == -2) return child == 0 ? null : Off;
+                    if (v < 0 || v > 1000) return new VendorSource.Result();
+                    int st = bragi(c, child, 0x10);
+                    return st == 3 ? Ok(100, false) : Ok(v / 10, st == 1);
+                }
+            });
+            // Corsair NXP (Dark Core RGB / SE, K63 Wireless, protocolo antigo): 00 0E 50 -> 0E 50; byte 5 = nível 0-4,
+            // byte 6: 1 na bateria, 2 carregando, 3 carregado
+            var nxpLevels = new[] { 0, 15, 30, 50, 100 };
+            l.Add(new VendorSource.Family {
+                Id = "corsair", Label = "Corsair", Kind = DeviceKind.Mouse, Vid = 0x1B1C,
+                Models = M(0x1B35, "Corsair Dark Core RGB", 0x1B64, "Corsair Dark Core RGB", 0x1B4B, "Corsair Dark Core RGB SE", 0x1B51, "Corsair Dark Core RGB SE",
+                           0x1B45, "Corsair K63 Wireless", 0x1B8C, "Corsair K63 Wireless", 0x1B50, "Corsair K63 Wireless", 0x1B8F, "Corsair K63 Wireless"),
+                Kinds = new Dictionary<ushort, DeviceKind> { { 0x1B45, DeviceKind.Keyboard }, { 0x1B8C, DeviceKind.Keyboard }, { 0x1B50, DeviceKind.Keyboard }, { 0x1B8F, DeviceKind.Keyboard } },
+                Collection = i => i.UsagePage >= 0xFF00 && i.OutLen == 65,
+                Read = c =>
+                {
+                    var f = c.Ask(B(0x00, 0x0E, 0x50), x => x.Length > 6 && x[1] == 0x0E && x[2] == 0x50, 1500);
+                    if (f == null) return null;
+                    if (f[5] == 0 || f[5] > 4) return Off;
+                    return f[6] == 3 ? Ok(100, false) : Ok(nxpLevels[f[5]], f[6] == 2);
+                }
+            });
+
+            // HyperX Pulsefire Dart (sem número de relatório): 00 51 -> byte 1 = 51, byte 4 = 03, byte 5 = %, byte 6 = 1 carregando;
+            // quadro 46 com byte 5 = 0: receptor sem o mouse
+            l.Add(new VendorSource.Family {
+                Id = "hyperx", Label = "HyperX", Kind = DeviceKind.Mouse, Vid = 0x0951,
+                Models = M(0x16E1, "HyperX Pulsefire Dart", 0x16E2, "HyperX Pulsefire Dart"),
+                Collection = i => (i.Pid == 0x16E1 ? VendorSource.Mi(i) == 2 && i.UsagePage == 0xFF00 : VendorSource.Mi(i) == 1 && i.UsagePage == 0xFF13) && i.OutLen >= 64,
+                Read = c =>
+                {
+                    var f = c.Ask(B(0x00, 0x51), x => x.Length > 6 && ((x[1] == 0x51 && x[4] == 0x03) || (x[1] == 0x46 && x[5] == 0x00)), 1000);
+                    if (f == null) return null;
+                    if (f[1] == 0x46) return Off;
+                    return f[5] <= 100 ? Ok(f[5], f[6] == 0x01) : new VendorSource.Result();
+                }
+            });
+            // HyperX Pulsefire Haste 2 Wireless / Core / Mini: 52 01 -> 53 01 (byte 2 = 0: mouse desligado);
+            // 50 02 -> 51 02, byte 2 = %, byte 3: 1 carregando, 2 carregado
+            l.Add(new VendorSource.Family {
+                Id = "hyperx", Label = "HyperX", Kind = DeviceKind.Mouse, Vid = 0x03F0,
+                Models = M(0x0F98, "HyperX Pulsefire Haste 2 Wireless", 0x0D97, "HyperX Pulsefire Haste 2 Wireless", 0x0AB5, "HyperX Pulsefire Haste 2 Core Wireless",
+                           0x0DA0, "HyperX Pulsefire Haste 2 Mini"),
+                Collection = i => VendorSource.Mi(i) == 2 && i.UsagePage == 0xFF00 && i.Usage == 0x0001 && i.OutLen >= 64,
+                Read = c =>
+                {
+                    var on = c.Ask(B(0x52, 0x01), Starts(0x53, 0x01), 1000);
+                    if (on == null) return null;
+                    if (on[2] == 0) return Off;
+                    var bt = c.Ask(B(0x50, 0x02), x => x[0] == 0x51 && x[1] == 0x02 && x[2] <= 100, 1000);
+                    if (bt == null) return new VendorSource.Result();
+                    return bt[3] == 2 ? Ok(100, false) : Ok(bt[2], bt[3] == 1);
+                }
+            });
+
+            // Keychron M5 / M6 (receptor Ultra-Link 8K ou cabo): B3 06 -> B4 06; byte 20: bits 0-6 = %, bit 7 = carregando
+            l.Add(new VendorSource.Family {
+                Id = "keychron", Label = "Keychron", Kind = DeviceKind.Mouse, Vid = 0x3434,
+                Models = M(0xD028, null, 0xD048, "Keychron M5", 0xD049, "Keychron M6 8K"),
+                Collection = i => (i.UsagePage == 0xFFC1 && i.Usage == 0x0001 || VendorSource.Mi(i) == 4) && i.OutLen >= 21 && i.InLen >= 21,
+                Read = c =>
+                {
+                    var f = c.Ask(B(0xB3, 0x06), x => x.Length > 20 && x[0] == 0xB4 && x[1] == 0x06, 800);
+                    if (f == null) return null;
+                    int pct = f[20] & 0x7F;
+                    return pct > 0 && pct <= 100 ? Ok(pct, (f[20] & 0x80) != 0) : new VendorSource.Result();
+                }
+            });
+        }
+
+        // tensão (mV) -> %, por uma tabela de pontos em ordem decrescente de tensão
+        static int Curve(int mv, int[] mvs, int[] pcts)
+        {
+            if (mv >= mvs[0]) return pcts[0];
+            for (int i = 1; i < mvs.Length; i++)
+                if (mv >= mvs[i]) return pcts[i] + (pcts[i - 1] - pcts[i]) * (mv - mvs[i]) / (mvs[i - 1] - mvs[i]);
+            return pcts[pcts.Length - 1];
+        }
+
+        // HyperX Cloud Flight: curva usada pelo HeadsetControl (polinômio sobre a tensão em mV)
+        internal static int CloudFlightPercent(int mv)
+        {
+            if (mv <= 3648) return (int)(0.00125 * mv);
+            if (mv > 3975) return 100;
+            double v = mv;
+            double p = 2.547505e-8 * Math.Pow(v, 4) - 3.900299e-4 * Math.Pow(v, 3) + 2.238321 * v * v - 5706.256 * v + 5452299.0;
+            return Math.Max(0, Math.Min(100, (int)Math.Round(p)));
+        }
+
+        static readonly int[] Tens = { 100, 90, 80, 70, 60, 50, 40, 30, 20, 10, 0 };
+        static int inzoneTid = 1;
+
+        // ---------------------------------------------------------------- headsets
+        // Fontes: HeadsetControl (github.com/Sapd/HeadsetControl, lib/devices), BatteryHub/Wireless-Device-Battery-Monitor
+        // (github.com/krisgfx9, src/drivers), HyperBatteryMonitor e HyperHeadset (MIT). Comandos que gravam configurações
+        // (desligamento automático, sidetone, luzes, "salvar") nunca são enviados.
+        static void Headsets(List<VendorSource.Family> l)
+        {
+            // HyperX Cloud III Wireless / Cloud II Core Wireless: relatório 0x66; 82 = ligado, 8A = carregando, 89 = bateria
+            l.Add(new VendorSource.Family {
+                Id = "hyperx", Label = "HyperX", Kind = DeviceKind.Headset, Vid = 0x03F0,
+                Models = M(0x05B7, "HyperX Cloud III Wireless", 0x0C9D, "HyperX Cloud III Wireless", 0x0FCC, "HyperX Cloud III Wireless",
+                           0x069F, "HyperX Cloud II Core Wireless", 0x0995, "HyperX Cloud II Core Wireless"),
+                Collection = i => i.OutLen >= 62 && i.InLen >= 62 && (i.UsagePage >= 0xFF00 || (i.OutLen == 62 && i.InLen == 62)),
+                Read = c =>
+                {
+                    // 82 diz se o headset está ligado ao receptor; como nem todo projeto usa esse pedido, a bateria (89) é
+                    // perguntada mesmo assim: uma resposta com tensão (bytes 2-3) também prova que o headset está ligado
+                    var on = c.Ask(B(0x66, 0x82), Starts(0x66, 0x82), 800);
+                    var bt = c.Ask(B(0x66, 0x89), x => x[0] == 0x66 && x[1] == 0x89 && x[4] <= 100 && (x[2] != 0 || x[3] != 0), 800);
+                    if (bt == null)
+                    {
+                        if (on == null) return null;
+                        if (on[2] == 0) return Off;
+                    }
+                    var ch = c.Ask(B(0x66, 0x8A), Starts(0x66, 0x8A), 800);
+                    return Ok(bt != null ? bt[4] : -1, ch != null && ch[2] == 1);
+                }
+            });
+
+            // HyperX Cloud II Wireless (HP): relatório 0x06 "06 FF BB <cmd>"; 02 = bateria (byte 7), 03 = carregando (byte 4)
+            l.Add(new VendorSource.Family {
+                Id = "hyperx", Label = "HyperX", Kind = DeviceKind.Headset, Vid = 0x03F0,
+                Models = M(0x0696, "HyperX Cloud II Wireless", 0x018B, "HyperX Cloud II Wireless", 0x0D93, "HyperX Cloud II Wireless"),
+                Collection = i => i.UsagePage == 0xFF90 && i.Usage == 0x0303,
+                Read = c =>
+                {
+                    var bt = c.Ask(B(0x06, 0xFF, 0xBB, 0x02), Starts(0x06, 0xFF, 0xBB, 0x02), 1000);
+                    if (bt == null) return null;
+                    var ch = c.Ask(B(0x06, 0xFF, 0xBB, 0x03), Starts(0x06, 0xFF, 0xBB, 0x03), 1000);
+                    return Ok(bt[7] <= 100 ? bt[7] : -1, ch != null && ch[4] == 1);
+                }
+            });
+
+            // HyperX Cloud II Wireless (Kingston) e Cloud Flight S: quadro "06 00 02 00 9A ... BB <cmd>", resposta 0x0B
+            // 01 = ligado (byte 4: 1 ou 4), 02 = bateria (byte 7), 03 = carregando (byte 4)
+            Func<int, byte[]> kingston = cmd => B(0x06, 0x00, 0x02, 0x00, 0x9A, 0x00, 0x00, 0x68, 0x4A, 0x8E, 0x0A, 0x00, 0x00, 0x00, 0xBB, cmd, 0x00);
+            l.Add(new VendorSource.Family {
+                Id = "hyperx", Label = "HyperX", Kind = DeviceKind.Headset, Vid = 0x0951,
+                Models = M(0x1718, "HyperX Cloud II Wireless", 0x0B92, "HyperX Cloud II Wireless", 0x16EA, "HyperX Cloud Flight S", 0x16EB, "HyperX Cloud Flight S"),
+                Collection = i => i.OutLen == 62,
+                Read = c =>
+                {
+                    var on = c.Ask(kingston(0x01), Starts(0x0B, -1, 0xBB, 0x01), 1000);
+                    if (on == null) return null;
+                    if (on[4] != 1 && on[4] != 4) return Off;
+                    var bt = c.Ask(kingston(0x02), Starts(0x0B, -1, 0xBB, 0x02), 1000);
+                    var ch = c.Ask(kingston(0x03), Starts(0x0B, -1, 0xBB, 0x03), 1000);
+                    return Ok(bt != null && bt[7] <= 100 ? bt[7] : -1, ch != null && ch[4] == 1);
+                }
+            });
+
+            // HyperX Cloud Alpha Wireless: relatório 0x21 "21 BB <cmd>"; 03 = desligado (byte 3 = 1), 0C = carregando, 0B = bateria.
+            // Carregando, o headset não informa a %.
+            l.Add(new VendorSource.Family {
+                Id = "hyperx", Label = "HyperX", Kind = DeviceKind.Headset, Vid = 0x03F0,
+                Models = M(0x098D, "HyperX Cloud Alpha Wireless"),
+                Collection = i => i.UsagePage >= 0xFF00 && i.OutLen >= 3,
+                Read = c =>
+                {
+                    var st = c.Ask(B(0x21, 0xBB, 0x03), Starts(0x21, -1, 0x03), 1500);
+                    if (st == null) return null;
+                    if (st[3] == 1) return Off;
+                    var ch = c.Ask(B(0x21, 0xBB, 0x0C), Starts(0x21, -1, 0x0C), 1500);
+                    if (ch != null && ch[3] == 1) return Ok(-1, true);
+                    var bt = c.Ask(B(0x21, 0xBB, 0x0B), Starts(0x21, -1, 0x0B), 1500);
+                    return Ok(bt != null && bt[3] <= 100 ? bt[3] : -1, false);
+                }
+            });
+
+            // HyperX Cloud Alpha 2 Wireless (controle da base): 52 01 -> 53 01 (ligado), 50 02 -> 51 02 (bateria, carregando)
+            l.Add(new VendorSource.Family {
+                Id = "hyperx", Label = "HyperX", Kind = DeviceKind.Headset, Vid = 0x03F0,
+                Models = M(0x08BE, "HyperX Cloud Alpha 2 Wireless"),
+                Collection = i => i.UsagePage == 0xFF13 && i.Usage == 0xFF00 && VendorSource.Mi(i) == 2,
+                Read = c =>
+                {
+                    var on = c.Ask(B(0x52, 0x01), Starts(0x53, 0x01), 1000);
+                    if (on == null) return null;
+                    if (on[2] == 0) return Off;
+                    var bt = c.Ask(B(0x50, 0x02), x => x[0] == 0x51 && x[1] == 0x02 && x[2] <= 100, 1000);
+                    return bt == null ? new VendorSource.Result() : Ok(bt[2], bt[3] == 1);
+                }
+            });
+
+            // HyperX Cloud Flight: 21 FF 05 -> tensão nos bytes 3-4; acima de 4107 mV está carregando (sem %)
+            Func<VendorSource.Ctx, VendorSource.Result> flight = c =>
+            {
+                var f = c.Ask(B(0x21, 0xFF, 0x05), Starts(0x21, 0xFF, 0x05), 2000);
+                if (f == null) return null;
+                int mv = f[3] << 8 | f[4];
+                if (mv == 0) return Off;
+                if (mv > 4107) return Ok(-1, true);
+                return Ok(CloudFlightPercent(mv), false);
+            };
+            l.Add(new VendorSource.Family {
+                Id = "hyperx", Label = "HyperX", Kind = DeviceKind.Headset, Vid = 0x0951,
+                Models = M(0x16C4, "HyperX Cloud Flight", 0x1723, "HyperX Cloud Flight", 0x1749, "HyperX Cloud Flight"),
+                Collection = i => i.UsagePage >= 0xFF00 && i.OutLen >= 3, Read = flight });
+            l.Add(new VendorSource.Family {
+                Id = "hyperx", Label = "HyperX", Kind = DeviceKind.Headset, Vid = 0x03F0,
+                Models = M(0x0E90, "HyperX Cloud Flight"),
+                Collection = i => i.UsagePage >= 0xFF00 && i.OutLen >= 3, Read = flight });
+
+            // HyperX Cloud Stinger Core Wireless: "feature reports" 0xFF; um pedido diz se o headset está ligado (byte 11),
+            // outro traz o estado (byte 9: 3 na bateria, 5 carregando, 6 carregado) e a tensão (bytes 11-12)
+            var stingerCharging = new[] { 4130, 4090, 4050, 4000, 3967, 3946, 3930, 3916, 3871, 3831, 3400 };
+            var stingerDischarging = new[] { 4121, 4042, 3954, 3905, 3838, 3785, 3763, 3738, 3700, 3651, 3517 };
+            Func<VendorSource.Ctx, VendorSource.Result> stinger = c =>
+            {
+                var on = c.Feature(B(0xFF, 0x07, 0x00, 0xFD, 0x04, 0x00, 0x00, 0x02, 0x82, 0x03, 0x05, 0x29, 0x0F, 0x00, 0x00, 0x03, 0x68, 0x10, 0x00, 0x00),
+                                   x => x[0] == 0xFF && !(x[1] == 0x01 && x[2] == 0x00) && x.Length > 11, 20, 10, 0xFF);
+                if (on == null) return null;
+                if (on[11] != 1) return Off;
+                var bt = c.Feature(B(0xFF, 0x07, 0x00, 0xFD, 0x04, 0x0C, 0xF1, 0x02, 0x01, 0x04, 0xF0, 0x0C),
+                                   x => x[0] == 0xFF && x[1] == 0x12 && x[2] == 0x05 && x.Length > 12, 20, 10, 0xFF);
+                if (bt == null) return new VendorSource.Result();
+                int mv = bt[11] | bt[12] << 8;
+                switch (bt[9])
+                {
+                    case 0x03: return Ok(Curve(mv, stingerDischarging, Tens), false);
+                    case 0x05: return Ok(Curve(mv, stingerCharging, Tens), true);
+                    case 0x06: return Ok(100, false);
+                    default: return new VendorSource.Result();
+                }
+            };
+            Func<Hid.Info, bool> stingerCol = i => i.UsagePage == 0xFF00 && i.Usage == 0x0001 && i.FeatLen >= 32 && VendorSource.Mi(i) == 3;
+            l.Add(new VendorSource.Family {
+                Id = "hyperx", Label = "HyperX", Kind = DeviceKind.Headset, Vid = 0x0951,
+                Models = M(0x170B, "HyperX Cloud Stinger Core Wireless", 0x1713, "HyperX Cloud Stinger Core Wireless", 0x173F, "HyperX Cloud Core Wireless"),
+                Collection = stingerCol, Read = stinger });
+            l.Add(new VendorSource.Family {
+                Id = "hyperx", Label = "HyperX", Kind = DeviceKind.Headset, Vid = 0x03F0,
+                Models = M(0x0A93, "HyperX Cloud Stinger Core Wireless", 0x0A8E, "HyperX Cloud Stinger Core Wireless"),
+                Collection = stingerCol, Read = stinger });
+
+            // SteelSeries Arctis 1 / 7X / 7P: 06 12 -> byte 2 = 1 desligado, byte 3 = %
+            l.Add(new VendorSource.Family {
+                Id = "steelseries", Label = "SteelSeries", Kind = DeviceKind.Headset, Vid = 0x1038,
+                Models = M(0x12B3, "Arctis 1 Wireless", 0x12B6, "Arctis 1 Wireless (Xbox)", 0x12D7, "Arctis 7X", 0x12D5, "Arctis 7P"),
+                Collection = i => i.UsagePage == 0xFF43 && i.Usage == 0x0202 && VendorSource.Mi(i) == 3,
+                Read = c =>
+                {
+                    var f = c.Ask(B(0x06, 0x12), x => x.Length > 3, 1000);
+                    if (f == null) return null;
+                    if (f[2] == 1) return Off;
+                    return f[3] <= 100 ? Ok(f[3], false) : new VendorSource.Result();
+                }
+            });
+
+            // SteelSeries Arctis 7 (2017/2019): 06 18 -> byte 2 = % (0 = desligado)
+            l.Add(new VendorSource.Family {
+                Id = "steelseries", Label = "SteelSeries", Kind = DeviceKind.Headset, Vid = 0x1038,
+                Models = M(0x1260, "Arctis 7", 0x12AD, "Arctis 7"),
+                Collection = i => i.UsagePage == 0xFF43 && i.Usage == 0x0202 && VendorSource.Mi(i) == 5,
+                Read = c =>
+                {
+                    var f = c.Ask(B(0x06, 0x18), x => x.Length > 2, 1000);
+                    if (f == null) return null;
+                    if (f[2] == 0) return Off;
+                    return f[2] <= 100 ? Ok(f[2], false) : new VendorSource.Result();
+                }
+            });
+
+            // SteelSeries Arctis 9 (sem número de relatório): 00 20 -> byte 4 = bateria bruta 0x64..0x9A, byte 5 = 1 carregando
+            l.Add(new VendorSource.Family {
+                Id = "steelseries", Label = "SteelSeries", Kind = DeviceKind.Headset, Vid = 0x1038,
+                Models = M(0x12C2, "Arctis 9"),
+                Collection = i => VendorSource.Mi(i) == 0 && i.OutLen > 0,
+                Read = c =>
+                {
+                    var f = c.Ask(B(0x00, 0x20), x => x.Length > 5, 1000);
+                    if (f == null) return null;
+                    int pct = Math.Max(0, Math.Min(100, (f[4] - 0x64) * 100 / (0x9A - 0x64)));
+                    return Ok(pct, f[5] == 1);
+                }
+            });
+
+            // SteelSeries Arctis Pro Wireless (sem número de relatório): 00 41 AA -> byte 1: 2 desligado, 4 ligado;
+            // 00 40 AA -> byte 1 = nível 0-4
+            l.Add(new VendorSource.Family {
+                Id = "steelseries", Label = "SteelSeries", Kind = DeviceKind.Headset, Vid = 0x1038,
+                Models = M(0x1290, "Arctis Pro Wireless"),
+                Collection = i => VendorSource.Mi(i) == 0 && i.OutLen > 0,
+                Read = c =>
+                {
+                    var st = c.Ask(B(0x00, 0x41, 0xAA), x => x.Length > 1 && (x[1] == 0x02 || x[1] == 0x04), 1000);
+                    if (st == null) return null;
+                    if (st[1] == 0x02) return Off;
+                    var bt = c.Ask(B(0x00, 0x40, 0xAA), x => x.Length > 1 && x[1] <= 4, 1000);
+                    return bt == null ? new VendorSource.Result() : Ok(bt[1] * 25, false);
+                }
+            });
+
+            // SteelSeries Arctis Nova Pro Wireless (base): 06 B0 -> byte 15: 1 desligado, 2 carregando no cabo, 8 ligado; byte 6 = nível 0-8
+            l.Add(new VendorSource.Family {
+                Id = "steelseries", Label = "SteelSeries", Kind = DeviceKind.Headset, Vid = 0x1038,
+                Models = M(0x12E0, "Arctis Nova Pro Wireless", 0x12E5, "Arctis Nova Pro Wireless", 0x225D, "Arctis Nova Pro Wireless"),
+                Collection = i => VendorSource.Mi(i) == 4 && i.OutLen >= 31,
+                Read = c =>
+                {
+                    var f = c.Ask(B(0x06, 0xB0), x => x[0] == 0x06 && x.Length >= 16, 1000);
+                    if (f == null) return null;
+                    if (f[15] == 0x01) return Off;
+                    if (f[15] != 0x02 && f[15] != 0x08) return new VendorSource.Result();
+                    return f[6] <= 8 ? Ok(f[6] * 100 / 8, f[15] == 0x02) : new VendorSource.Result();
+                }
+            });
+
+            // SteelSeries Arctis Nova e 7+ (FFC0, sem número de relatório): 00 B0 -> bloco de estado que começa com 00 B0
+            Func<Func<byte[], VendorSource.Result>, Func<VendorSource.Ctx, VendorSource.Result>> nova = parse => c =>
+            {
+                var f = c.Ask(B(0x00, 0xB0), x => x.Length > 7 && x[0] == 0x00 && x[1] == 0xB0, 1000);
+                return f == null ? null : parse(f);
+            };
+            Func<Hid.Info, bool> novaCol = i => i.UsagePage == 0xFFC0 && i.Usage == 0x0001 && VendorSource.Mi(i) == 3;
+            l.Add(new VendorSource.Family {
+                Id = "steelseries", Label = "SteelSeries", Kind = DeviceKind.Headset, Vid = 0x1038,
+                Models = M(0x220E, "Arctis 7+", 0x2212, "Arctis 7P+", 0x2216, "Arctis 7X+", 0x2236, "Arctis 7+ Destiny"),
+                Collection = novaCol,
+                Read = nova(f => f[2] == 0x01 ? Off : f[3] <= 4 ? Ok(f[3] * 25, f[4] == 0x01) : new VendorSource.Result())
+            });
+            l.Add(new VendorSource.Family {
+                Id = "steelseries", Label = "SteelSeries", Kind = DeviceKind.Headset, Vid = 0x1038,
+                Models = M(0x2269, "Arctis Nova 3P Wireless", 0x226D, "Arctis Nova 3X Wireless", 0x2232, "Arctis Nova 5", 0x2253, "Arctis Nova 5X"),
+                Collection = novaCol,
+                Read = nova(f => f[2] == 0x02 ? Off : f[4] <= 100 ? Ok(f[4], f[5] == 0x01) : new VendorSource.Result())
+            });
+            // Nova 7: byte 4 = 0 desligado, 1/2 carregando; byte 3 = nível (0-4 nos modelos antigos, % depois da atualização de 2026)
+            var nova7Steps = new HashSet<ushort> { 0x2202, 0x2206, 0x220A, 0x223A, 0x227A, 0x22A4 };
+            l.Add(new VendorSource.Family {
+                Id = "steelseries", Label = "SteelSeries", Kind = DeviceKind.Headset, Vid = 0x1038,
+                Models = M(0x2202, "Arctis Nova 7", 0x22A1, "Arctis Nova 7", 0x227E, "Arctis Nova 7 Gen 2", 0x2206, "Arctis Nova 7X", 0x2258, "Arctis Nova 7X v2",
+                           0x229E, "Arctis Nova 7X v2", 0x22AD, "Arctis Nova 7X v2", 0x223A, "Arctis Nova 7 Diablo IV", 0x22A9, "Arctis Nova 7 Diablo IV",
+                           0x227A, "Arctis Nova 7 WoW", 0x22A4, "Arctis Nova 7X", 0x22A5, "Arctis Nova 7X", 0x220A, "Arctis Nova 7P", 0x22A7, "Arctis Nova 7P v2", 0x2298, "Arctis Nova 7P v2"),
+                Collection = novaCol,
+                Read = c => nova(f =>
+                {
+                    if (f[4] == 0x00) return Off;
+                    int pct = nova7Steps.Contains(c.Pid) ? (f[3] <= 4 ? f[3] * 25 : -1) : (f[3] <= 100 ? f[3] : -1);
+                    return Ok(pct, f[4] == 0x01 || f[4] == 0x02);
+                })(c)
+            });
+            // Arctis GameBuds: byte 4/5 = estado do fone esquerdo/direito (3 = fora do estojo), byte 6/7 = %; vale o menor dos que estão fora
+            l.Add(new VendorSource.Family {
+                Id = "steelseries", Label = "SteelSeries", Kind = DeviceKind.Headset, Vid = 0x1038,
+                Models = M(0x230A, "Arctis GameBuds"),
+                Collection = novaCol,
+                Read = nova(f =>
+                {
+                    var p = new List<int>();
+                    if (f[4] == 0x03 && f[6] <= 100) p.Add(f[6]);
+                    if (f[5] == 0x03 && f[7] <= 100) p.Add(f[7]);
+                    return p.Count == 0 ? Off : Ok(p.Min(), false);
+                })
+            });
+
+            // Corsair Void / Void Pro / Void Elite / HS70 / HS80 (protocolo antigo): C9 64 -> resposta 0x64,
+            // byte 2 = % (bits 0-6), byte 4 = estado (0 desligado, 1/2 na bateria, 4/5 carregando)
+            l.Add(new VendorSource.Family {
+                Id = "corsair", Label = "Corsair", Kind = DeviceKind.Headset, Vid = 0x1B1C,
+                Models = M(0x1B1C, null, 0x1B27, null, 0x0A14, null, 0x0A16, null, 0x0A17, null, 0x0A1D, null, 0x0A1A, null, 0x1B2A, null, 0x1B23, null,
+                           0x1B29, null, 0x0A55, null, 0x0A51, null, 0x0A52, null, 0x0A38, null, 0x0A4F, null, 0x0A2B, null, 0x0A75, null, 0x0A56, null),
+                Collection = i => i.UsagePage == 0xFFC5 && i.Usage == 0x0001 && VendorSource.Mi(i) == 3,
+                Read = c =>
+                {
+                    var f = c.Ask(B(0xC9, 0x64), x => x[0] == 0x64 && x.Length >= 5, 1000);
+                    if (f == null) return null;
+                    switch (f[4])
+                    {
+                        case 0: return Off;
+                        case 1: case 2: return Ok(f[2] & 0x7F, false);
+                        case 4: case 5: return Ok(f[2] & 0x7F, true);
+                        default: return new VendorSource.Result();
+                    }
+                }
+            });
+
+            // Corsair Virtuoso XT / SE (protocolo "Bragi", só leitura): 02 <alvo> 02 <propriedade>; alvo 09 = headset pelo receptor,
+            // 08 = o próprio aparelho. Resposta 01 <origem> 02 <estado> <valor LE>. Propriedade 0F = bateria 0-1000, 10 = 1 carregando.
+            Func<VendorSource.Ctx, int, int, int, int> bragi64 = (c, target, prop, timeout) =>
+            {
+                var f = c.Ask(B(0x02, target, 0x02, prop), x => x[0] == 0x01 && (x[1] == 0x00 || x[1] == 0x01) && x[2] == 0x02 && x.Length > 7, timeout);
+                if (f == null) return -2;            // sem resposta
+                if (f[3] != 0x00) return -1;         // propriedade recusada
+                return f[4] | f[5] << 8 | f[6] << 16 | f[7] << 24;
+            };
+            l.Add(new VendorSource.Family {
+                Id = "corsair", Label = "Corsair", Kind = DeviceKind.Headset, Vid = 0x1B1C,
+                Models = M(0x0A64, "Corsair Virtuoso RGB Wireless XT", 0x0A62, "Corsair Virtuoso RGB Wireless XT", 0x0A3E, "Corsair Virtuoso RGB Wireless SE", 0x0A3D, "Corsair Virtuoso RGB Wireless SE"),
+                Collection = i => i.UsagePage == 0xFF42 && i.Usage == 0x0001 && VendorSource.Mi(i) == 3,
+                Read = c =>
+                {
+                    int target = c.Pid == 0x0A62 ? 0x08 : 0x09;
+                    int v = bragi64(c, target, 0x0F, 300);
+                    if (v == -2) { target ^= 0x01; v = bragi64(c, target, 0x0F, 300); } // tenta o outro alvo
+                    if (v == -2) return null;
+                    if (v < 0 || v > 1000) return new VendorSource.Result();
+                    return Ok(v / 10, bragi64(c, target, 0x10, 300) == 1);
+                }
+            });
+
+            // Corsair Void Wireless v2 / Virtuoso MAX / HS80 MAX (Bragi sem número de relatório, 65 bytes): 00 02 <alvo> 02 <prop>,
+            // resposta 00 02 <origem> 02 <estado> <valor LE>. Antes, o "batimento" do receptor (08/12) e do headset (09/12).
+            Func<VendorSource.Ctx, int, int, int, int> bragi65 = (c, target, prop, timeout) =>
+            {
+                var f = c.Ask(B(0x00, 0x02, target, 0x02, prop), x => x[0] == 0x00 && x[1] == 0x02 && x[3] == 0x02 && x.Length > 8, timeout);
+                if (f == null) return -2;
+                if (f[4] != 0x00) return -1;
+                return f[5] | f[6] << 8 | f[7] << 16 | f[8] << 24;
+            };
+            l.Add(new VendorSource.Family {
+                Id = "corsair", Label = "Corsair", Kind = DeviceKind.Headset, Vid = 0x1B1C,
+                Models = M(0x2A08, "Corsair Void Wireless v2", 0x2A02, "Corsair Virtuoso MAX", 0x0A97, "Corsair HS80 MAX"),
+                Collection = i => VendorSource.Mi(i) == 4 && i.OutLen == 65,
+                Read = c =>
+                {
+                    if (bragi65(c, 0x08, 0x12, 500) == -2) return null;  // receptor não respondeu
+                    if (bragi65(c, 0x09, 0x12, 1000) == -2) return Off;  // headset desligado
+                    int v = -1;
+                    for (int i = 0; i < 3 && (v <= 0 || v > 1000); i++) v = bragi65(c, 0x09, 0x0F, 1000);
+                    if (v <= 0 || v > 1000) return new VendorSource.Result();
+                    return Ok(v / 10, bragi65(c, 0x09, 0x10, 500) == 1);
+                }
+            });
+
+            // JBL Quantum 520/650/850/950 (HIDV3): "feature" 88 00 DD 01 00 01 00 02 00 0D 00 -> relatório de entrada 86 00 DD 01 00 01;
+            // byte 15: bits 0-6 = %, bit 7 = carregando. Sem resposta: headset desligado.
+            l.Add(new VendorSource.Family {
+                Id = "jbl", Label = "JBL", Kind = DeviceKind.Headset, Vid = 0x0ECB,
+                Models = M(0x2125, "JBL Quantum 650", 0x2126, "JBL Quantum 650", 0x213B, "JBL Quantum 650X", 0x213D, "JBL Quantum 650X",
+                           0x2127, "JBL Quantum 950", 0x2128, "JBL Quantum 950", 0x213E, "JBL Quantum 950X", 0x2140, "JBL Quantum 950X",
+                           0x218D, "JBL Quantum 520", 0x218E, "JBL Quantum 520", 0x21A7, "JBL Quantum 520X", 0x21A9, "JBL Quantum 520X",
+                           0x219A, "JBL Quantum 850", 0x219B, "JBL Quantum 850"),
+                Collection = i => i.UsagePage == 0xFF12 && i.FeatLen >= 11 && i.InLen >= 16,
+                Read = c =>
+                {
+                    var f = c.AskOther(c.Info, B(0x88, 0x00, 0xDD, 0x01, 0x00, 0x01, 0x00, 0x02, 0x00, 0x0D, 0x00), true,
+                        x => x.Length > 15 && x[0] == 0x86 && x[1] == 0x00 && x[2] == 0xDD && x[3] == 0x01 && x[4] == 0x00 && x[5] == 0x01
+                             && (x[10] & 0x80) == 0 && x[11] == 0x0D && x[12] == 0x00 && (x[13] != 0 || x[14] != 0), 800);
+                    if (f == null) return null;
+                    return (f[15] & 0x7F) <= 100 ? Ok(f[15] & 0x7F, (f[15] & 0x80) != 0) : new VendorSource.Result();
+                }
+            });
+
+            // Sony INZONE H9 II / H5: relatório 02 "02 0C 01 00 FC 08 96 C3 41 04 01 <tid> <soma>"; a resposta traz o mesmo tid,
+            // byte 13 = carregando, byte 14 = % (FF = desligado). O tid 1 é do próprio receptor.
+            l.Add(new VendorSource.Family {
+                Id = "inzone", Label = "Sony INZONE", Kind = DeviceKind.Headset, Vid = 0x054C,
+                Models = M(0x0FA8, "Sony INZONE H9 II", 0x0EBF, "Sony INZONE H5"),
+                Collection = i => i.UsagePage == 0xFF04 && i.OutLen >= 64,
+                Read = c =>
+                {
+                    int tid = Interlocked.Increment(ref inzoneTid);
+                    if (tid > 0xFFF0) { inzoneTid = 1; tid = 2; }
+                    var req = B(0x02, 0x0C, 0x01, 0x00, 0xFC, 0x08, 0x96, 0xC3, 0x41, 0x04, 0x01, tid & 0xFF, tid >> 8, 0x00);
+                    int sum = 0; for (int i = 6; i <= 12; i++) sum += req[i];
+                    req[13] = (byte)sum;
+                    var f = c.Ask(req, x => x.Length > 14 && x[0] == 0x02 && x[2] == 0x04 && x[3] == 0xFF && x[6] == 0x96 && x[7] == 0xC3 && x[9] == 0x04
+                                          && (x[10] == 0x10 || x[10] == 0xA0) && x[11] == (tid & 0xFF) && x[12] == (tid >> 8), 1500);
+                    if (f == null) return null;
+                    if (f[14] == 0xFF) return Off;
+                    return f[14] <= 100 ? Ok(f[14], f[13] != 0) : new VendorSource.Result();
+                }
+            });
+
+            // Audeze Maxwell / Maxwell 2: relatório 06 "06 07 80 05 5A 03 00 D6 0C 00"; a resposta chega em pedaços no relatório
+            // de entrada 07 (lido com HidD_GetInputReport): byte 1 = tamanho do pedaço, que começa no byte 3. A mensagem de bateria é
+            // 05 5D 05 00 D6 0C 00 00 <%>; 05 5B 03 00 D6 0C <estado != 0> é recusa (headset desligado).
+            l.Add(new VendorSource.Family {
+                Id = "audeze", Label = "Audeze", Kind = DeviceKind.Headset, Vid = 0x3329,
+                Models = M(0x4B19, "Audeze Maxwell", 0x4B18, "Audeze Maxwell", 0x4B29, "Audeze Maxwell 2", 0x4B28, "Audeze Maxwell 2"),
+                Collection = i => i.UsagePage == 0xFF13 && i.Usage == 0x0001 && i.OutLen >= 62,
+                Read = c =>
+                {
+                    var stream = new List<byte>();
+                    int pct = -1; bool refused = false;
+                    var ok = c.AskPolling(B(0x06, 0x07, 0x80, 0x05, 0x5A, 0x03, 0x00, 0xD6, 0x0C, 0x00), 0x07, x =>
+                    {
+                        int n = Math.Min(x[1], x.Length - 3);
+                        for (int i = 0; i < n; i++) stream.Add(x[3 + i]);
+                        var s = stream.ToArray();
+                        for (int i = 0; i + 8 < s.Length; i++)
+                        {
+                            if (s[i] == 0x05 && s[i + 1] == 0x5D && s[i + 2] == 0x05 && s[i + 3] == 0x00 && s[i + 4] == 0xD6 && s[i + 5] == 0x0C && s[i + 6] == 0x00 && s[i + 7] == 0x00)
+                            { pct = s[i + 8]; return true; }
+                            if (s[i] == 0x05 && s[i + 1] == 0x5B && s[i + 2] == 0x03 && s[i + 3] == 0x00 && s[i + 4] == 0xD6 && s[i + 5] == 0x0C && s[i + 6] != 0x00)
+                            { refused = true; return true; }
+                        }
+                        return false;
+                    }, 50, 1250);
+                    if (ok == null) return null;
+                    if (refused) return Off;
+                    return pct >= 0 && pct <= 100 ? Ok(pct, false) : new VendorSource.Result();
+                }
+            });
+
+            // ASTRO A50 (5ª geração, base 046D:0B1C): 02 0C 03 00 06 0C -> 02 0C .. 00 06 .. <%> .. <na base/carregando>
+            l.Add(new VendorSource.Family {
+                Id = "astro", Label = "ASTRO", Kind = DeviceKind.Headset, Vid = 0x046D,
+                Models = M(0x0B1C, "ASTRO A50"),
+                Collection = i => i.UsagePage == 0xFF32 && i.Usage == 0x0074 && VendorSource.Mi(i) == 8,
+                Read = c =>
+                {
+                    var f = c.Ask(B(0x02, 0x0C, 0x03, 0x00, 0x06, 0x0C), x => x.Length > 8 && x[0] == 0x02 && x[1] == 0x0C && x[2] >= 6 && x[3] == 0x00
+                                                                        && x[4] == 0x06 && (x[5] == 0x00 || x[5] == 0x0C) && x[6] <= 100, 1000);
+                    return f == null ? null : Ok(f[6], f[8] != 0);
+                }
+            });
+
+            // ASTRO A50 (4ª geração, 9886:002C): 02 54 -> byte 3 bit 1 = headset ligado à base; 02 7C -> byte 3: bit 7 carregando, bits 0-6 %
+            l.Add(new VendorSource.Family {
+                Id = "astro", Label = "ASTRO", Kind = DeviceKind.Headset, Vid = 0x9886,
+                Models = M(0x002C, "ASTRO A50"),
+                Collection = i => i.UsagePage == 0xFF32 && i.Usage == 0x0074 && VendorSource.Mi(i) == 6,
+                Read = c =>
+                {
+                    var st = c.Ask(B(0x02, 0x54), x => x.Length > 3 && x[0] == 0x02 && x[1] != 0x01, 1000);
+                    if (st == null) return null;
+                    if ((st[3] & 0x02) == 0) return Off;
+                    var bt = c.Ask(B(0x02, 0x7C), x => x.Length > 3 && x[0] == 0x02 && x[1] != 0x01 && (x[3] & 0x7F) <= 100, 1000);
+                    return bt == null ? new VendorSource.Result() : Ok(bt[3] & 0x7F, (bt[3] & 0x80) != 0);
+                }
+            });
+        }
+
+        static bool Gamepad(Hid.Info i) { return i.UsagePage == 1 && (i.Usage == 4 || i.Usage == 5 || i.Usage == 8); }
+        static bool Bluetooth(Hid.Info i) { return Hid.Bus(i.Path).StartsWith("Bluetooth"); }
+
+        // ---------------------------------------------------------------- controles: só escuta, nunca envia nada
+        // Fonte: SDL (src/joystick/hidapi: SDL_hidapi_ps4.c, _ps5.c, _switch.c, _8bitdo.c; zlib) e o driver do Linux
+        // (drivers/hid/hid-playstation.c, hid-nintendo.c). Pelo Bluetooth, o DualShock 4, o DualSense e o controle do Switch
+        // só mandam a bateria depois que algum programa (Steam, um jogo) liga o relatório completo; pedir isso daqui mudaria o
+        // modo do controle até ele reconectar e atrapalharia jogos antigos, então o app só lê quando o relatório já vem.
+        static void Controllers(List<VendorSource.Family> l)
+        {
+            // DualShock 4: byte de estado com o nível (0-10) no nibble baixo e o cabo no bit 4
+            Func<byte, VendorSource.Result> ds4 = b =>
+            {
+                int lvl = b & 0x0F; bool cable = (b & 0x10) != 0;
+                if (!cable) return Ok(lvl >= 10 ? 100 : lvl * 10 + 5, false);
+                if (lvl <= 10) return Ok(Math.Min(100, lvl * 10 + 5), true);
+                if (lvl == 11) return Ok(100, false); // carregado
+                return new VendorSource.Result();     // erro de carga: ligado, sem %
+            };
+            l.Add(new VendorSource.Family {
+                Id = "ds4", Label = "Sony DualShock 4", Kind = DeviceKind.Controller, Vid = 0x054C,
+                Models = M(0x05C4, "DualShock 4", 0x09CC, "DualShock 4", 0x0BA0, "DualShock 4"),
+                Collection = Gamepad,
+                Read = c =>
+                {
+                    if (Bluetooth(c.Info)) // relatório completo 0x11..0x19, com "dados HID" (bit 7 do byte 1); o 0x01 do Bluetooth não tem bateria
+                    {
+                        var f = c.Listen(x => x[0] >= 0x11 && x[0] <= 0x19 && x.Length > 32 && (x[1] & 0x80) != 0, 400);
+                        return f == null ? null : ds4(f[32]);
+                    }
+                    var u = c.Listen(x => x[0] == 0x01 && x.Length >= 64, 400);
+                    if (u == null) return null;
+                    if (c.Pid == 0x0BA0 && (u[31] & 0x04) != 0) return Off; // adaptador sem controle
+                    return ds4(u[30]);
+                }
+            });
+
+            // DualSense: nibble baixo = nível 0-10, nibble alto = 0 na bateria, 1 carregando, 2 carregado
+            Func<byte, VendorSource.Result> ds5 = b =>
+            {
+                int lvl = b & 0x0F, state = b >> 4;
+                if (state == 0 || state == 1) return Ok(Math.Min(100, lvl * 10 + 5), state == 1);
+                if (state == 2) return Ok(100, false);
+                return new VendorSource.Result(); // erro de carga (temperatura/tensão): ligado, sem %
+            };
+            l.Add(new VendorSource.Family {
+                Id = "dualsense", Label = "Sony DualSense", Kind = DeviceKind.Controller, Vid = 0x054C,
+                Models = M(0x0CE6, "DualSense", 0x0DF2, "DualSense Edge"),
+                Collection = Gamepad,
+                Read = c =>
+                {
+                    if (Bluetooth(c.Info)) { var f = c.Listen(x => x[0] == 0x31 && x.Length > 54, 400); return f == null ? null : ds5(f[54]); }
+                    var u = c.Listen(x => x[0] == 0x01 && x.Length >= 64, 400);
+                    return u == null ? null : ds5(u[53]);
+                }
+            });
+
+            // Nintendo: relatórios 0x30/0x31/0x21, byte 2: nível 0-4 nos bits 5-7 e carregando no bit 4.
+            // O relatório simples 0x3F (padrão no Bluetooth) não tem bateria.
+            l.Add(new VendorSource.Family {
+                Id = "switch", Label = "Nintendo Switch", Kind = DeviceKind.Controller, Vid = 0x057E,
+                Models = M(0x2009, "Switch Pro Controller", 0x2006, "Joy-Con (L)", 0x2007, "Joy-Con (R)", 0x200E, "Joy-Con (suporte)",
+                           0x2017, "Controle SNES (Switch)", 0x2019, "Controle N64 (Switch)", 0x201E, "Controle Mega Drive (Switch)"),
+                Collection = Gamepad,
+                Read = c =>
+                {
+                    var f = c.Listen(x => (x[0] == 0x30 || x[0] == 0x31 || x[0] == 0x21) && x.Length > 2, 400);
+                    if (f == null) return null;
+                    int lvl = f[2] >> 5;
+                    if (lvl > 4) return null;
+                    return Ok(lvl * 25, (f[2] & 0x10) != 0 && lvl < 4);
+                }
+            });
+
+            // 8BitDo Ultimate 3 no modo D-input (sempre manda o relatório completo): byte 14, bit 7 = carregando, bits 0-6 = %.
+            // Os outros 8BitDo só mandam esse relatório depois de um pedido, e no modo XInput já são lidos pelo XInput.
+            l.Add(new VendorSource.Family {
+                Id = "8bitdo", Label = "8BitDo", Kind = DeviceKind.Controller, Vid = 0x2DC8,
+                Models = M(0x202F, "8BitDo Ultimate 3"),
+                Collection = Gamepad,
+                Read = c =>
+                {
+                    var f = c.Listen(x => (x[0] == 0x01 || x[0] == 0x03 || x[0] == 0x04) && x.Length > 14 && (x[14] & 0x7F) <= 100, 400);
+                    return f == null ? null : Ok(f[14] & 0x7F, (f[14] & 0x80) != 0 && (f[14] & 0x7F) < 100);
+                }
+            });
+        }
+    }
+
+    // ------------------------------------------------------------------ Outras marcas: pedidos de bateria documentados por projetos abertos
+    // Cada família diz para quais aparelhos (VID:PID exatos) e para qual coleção HID manda o pedido, e como ler a resposta
+    // (veja VendorFamilies). Só pedidos de leitura, e nunca para um aparelho que não está na lista.
+    // Índices sempre no buffer do Windows: [0] é o número do relatório (0x00 quando o aparelho não numera os relatórios).
+    class VendorSource : IBatterySource
+    {
+        public class Result
+        {
+            public int Percent = -1;   // -1: o aparelho não informou (ex.: alguns headsets enquanto carregam)
+            public bool Charging;
+            public bool Online = true; // false: o receptor respondeu, mas o aparelho está desligado ou fora de alcance
+        }
+
+        public class Family
+        {
+            public string Id, Label;                     // prefixo da chave e nome no diagnóstico
+            public DeviceKind Kind;
+            public ushort Vid;
+            public Dictionary<ushort, string> Models;    // PID -> nome do aparelho
+            public Dictionary<ushort, DeviceKind> Kinds; // aparelhos de outro tipo que o da família (opcional)
+            public bool AnyPid;                          // qualquer PID do fabricante que tenha a coleção (nome do próprio aparelho)
+            public Func<Hid.Info, bool> Collection;      // a coleção que recebe o pedido
+            public Func<Ctx, Result> Read;               // null: o aparelho não respondeu
+        }
+
+        // O que cada família usa para conversar com o aparelho; toda resposta (ou falha) vai para o diagnóstico.
+        public class Ctx
+        {
+            public Hid.Info Info;
+            public List<Hid.Info> Device; // todas as coleções do aparelho (mesmo VID:PID)
+            public string Label;
+            public ushort Pid { get { return Info.Pid; } }
+
+            void Log(string what, byte[] frame) { Diagnostics.Raw(Label + " (" + what + ")", frame, 32); }
+            static string Hex(byte[] b, int n) { return BitConverter.ToString(b, 0, Math.Min(n, b.Length)).Replace('-', ' '); }
+
+            // relatório de saída e resposta num relatório de entrada da mesma coleção
+            public virtual byte[] Ask(byte[] req, Func<byte[], bool> accept, int timeoutMs)
+            {
+                var f = Hid.Exchange(Info, req, accept, timeoutMs);
+                Log("pedido " + Hex(req, 4), f);
+                return f;
+            }
+
+            // só escuta: aparelhos que mandam a bateria sozinhos (controles)
+            public virtual byte[] Listen(Func<byte[], bool> accept, int timeoutMs)
+            {
+                var f = Hid.Exchange(Info, null, accept, timeoutMs);
+                Log("escuta", f);
+                return f;
+            }
+
+            // "feature report": grava o pedido e lê a resposta (número replyId, ou o mesmo do pedido)
+            public virtual byte[] Feature(byte[] req, Func<byte[], bool> accept, int delayMs, int tries, int replyId = -1)
+            {
+                Hid.LastError = null; byte[] got = null, other = null;
+                using (var h = Hid.Open(Info.Path))
+                {
+                    if (h.IsInvalid) Hid.LastError = "não abriu (erro " + Marshal.GetLastWin32Error() + ")";
+                    else
+                    {
+                        int len = Math.Max((int)Info.FeatLen, req.Length);
+                        var buf = new byte[len]; Array.Copy(req, buf, req.Length);
+                        if (!Hid.HidD_SetFeature(h, buf, len)) Hid.LastError = "o envio falhou (feature: " + Info.FeatLen + " B)";
+                        else
+                            for (int i = 0; i < tries && got == null; i++)
+                            {
+                                Thread.Sleep(delayMs);
+                                var r = new byte[len]; r[0] = (byte)(replyId >= 0 ? replyId : req[0]);
+                                if (!Hid.HidD_GetFeature(h, r, len)) continue;
+                                if (accept(r)) got = r; else other = r;
+                            }
+                        if (got == null && Hid.LastError == null)
+                            Hid.LastError = "sem resposta" + (other != null ? "; a última leitura foi " + Hex(other, 16) : "");
+                    }
+                }
+                Log("feature " + Hex(req, 4), got);
+                return got;
+            }
+
+            // pedido numa coleção e resposta em outra do mesmo aparelho (a escuta abre antes do envio)
+            public virtual byte[] AskOther(Hid.Info reply, byte[] req, bool feature, Func<byte[], bool> accept, int timeoutMs)
+            {
+                Hid.LastError = null; byte[] got = null;
+                if (reply == null) { Hid.LastError = "coleção da resposta não encontrada"; Log("pedido " + Hex(req, 4), null); return null; }
+                var inbox = new BlockingCollection<byte[]>();
+                try
+                {
+                    using (new HidListener(reply, f => inbox.Add(f)))
+                    {
+                        bool sent;
+                        if (feature)
+                            using (var h = Hid.Open(Info.Path))
+                            {
+                                var buf = new byte[Math.Max((int)Info.FeatLen, req.Length)]; Array.Copy(req, buf, req.Length);
+                                sent = !h.IsInvalid && Hid.HidD_SetFeature(h, buf, buf.Length);
+                            }
+                        else sent = Hid.Write(Info, req);
+                        if (!sent) Hid.LastError = "o envio falhou";
+                        else
+                        {
+                            var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+                            byte[] f; int left;
+                            while (got == null && (left = (int)(deadline - DateTime.UtcNow).TotalMilliseconds) > 0 && inbox.TryTake(out f, left))
+                                if (accept(f)) got = f;
+                            if (got == null) Hid.LastError = "sem resposta em " + timeoutMs + " ms";
+                        }
+                    }
+                }
+                catch (IOException) { Hid.LastError = "não abriu a coleção da resposta"; }
+                Log("pedido " + Hex(req, 4) + ", resposta em " + reply.UsagePage.ToString("X4"), got);
+                return got;
+            }
+
+            // relatório de saída e resposta lida com HidD_GetInputReport (aparelhos que não mandam a resposta sozinhos)
+            public virtual byte[] AskPolling(byte[] req, byte inputId, Func<byte[], bool> accept, int intervalMs, int timeoutMs)
+            {
+                Hid.LastError = null; byte[] got = null;
+                if (!Hid.Write(Info, req)) Hid.LastError = "o envio falhou";
+                else
+                    using (var h = Hid.Open(Info.Path))
+                    {
+                        var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+                        while (got == null && DateTime.UtcNow < deadline)
+                        {
+                            Thread.Sleep(intervalMs);
+                            var r = new byte[Math.Max(1, (int)Info.InLen)]; r[0] = inputId;
+                            if (!h.IsInvalid && Hid.HidD_GetInputReport(h, r, r.Length) && accept(r)) got = r;
+                        }
+                        if (got == null) Hid.LastError = "sem resposta em " + timeoutMs + " ms";
+                    }
+                Log("pedido " + Hex(req, 4), got);
+                return got;
+            }
+
+            // outra coleção do mesmo aparelho
+            public Hid.Info Other(Func<Hid.Info, bool> match) { return Device.FirstOrDefault(match); }
+        }
+
+        public static readonly List<Family> Families = VendorFamilies.All();
+        static readonly HashSet<uint> handled = new HashSet<uint>(Families.SelectMany(f => f.Models.Keys.Select(p => (uint)f.Vid << 16 | p)));
+        public static bool Handles(ushort vid, ushort pid) { return handled.Contains((uint)vid << 16 | pid); }
+
+        // interface USB (MI_xx) da coleção, ou -1
+        public static int Mi(Hid.Info i)
+        {
+            var m = Regex.Match(i.Path ?? "", "&mi_([0-9a-f]{2})", RegexOptions.IgnoreCase);
+            return m.Success ? Convert.ToInt32(m.Groups[1].Value, 16) : -1;
+        }
+
+        readonly Dictionary<string, Reading> last = new Dictionary<string, Reading>();
+
+        public List<Reading> Poll()
+        {
+            var all = Hid.Enumerate();
+            var outcome = new Dictionary<string, Result>();
+            var meta = new Dictionary<string, Tuple<string, DeviceKind>>();
+            foreach (var fam in Families)
+                foreach (var grp in all.Where(i => i.Vid == fam.Vid && (fam.AnyPid ? i.Pid != 0 : fam.Models.ContainsKey(i.Pid))).GroupBy(i => i.Pid))
+                {
+                    if (fam.AnyPid && !grp.Any(fam.Collection)) continue;
+                    // sem nome na tabela: o nome que o aparelho informa
+                    string named; fam.Models.TryGetValue(grp.Key, out named);
+                    string name = named ??grp.Select(i => (i.Product ?? "").Trim()).FirstOrDefault(p => p.Length > 0) ?? fam.Label;
+                    // a chave é o modelo, não o PID: o mesmo aparelho pelo cabo e pelo receptor é um item só
+                    string key = fam.Id + ":" + Regex.Replace(name.ToLowerInvariant(), "[^a-z0-9]+", "-").Trim('-');
+                    Result prev;
+                    if (outcome.TryGetValue(key, out prev) && prev.Online) continue;
+                    var device = grp.ToList();
+                    DeviceKind kind;
+                    if (fam.Kinds == null || !fam.Kinds.TryGetValue(grp.Key, out kind)) kind = fam.Kind;
+                    meta[key] = Tuple.Create(name, kind);
+                    foreach (var col in device.Where(fam.Collection))
+                    {
+                        var ctx = new Ctx { Info = col, Device = device, Label = fam.Label + " " + fam.Vid.ToString("X4") + ":" + grp.Key.ToString("X4") };
+                        Result res = null;
+                        try { res = fam.Read(ctx); }
+                        catch (Exception ex) { Diagnostics.Raw(ctx.Label + " (erro " + ex.GetType().Name + ")", null, 0); }
+                        if (res == null) continue;
+                        if (!outcome.TryGetValue(key, out prev) || (res.Online && !prev.Online)) outcome[key] = res;
+                        if (res.Online) break;
+                    }
+                }
+
+            foreach (var kv in outcome)
+            {
+                Reading r; last.TryGetValue(kv.Key, out r);
+                var res = kv.Value;
+                if (!res.Online) { if (r != null) r.Online = false; continue; } // nunca lido: só aparece quando ligar
+                if (r == null) last[kv.Key] = r = new Reading { Key = kv.Key };
+                r.Name = meta[kv.Key].Item1; r.Kind = meta[kv.Key].Item2;
+                if (res.Percent >= 0) r.Percent = Math.Min(100, res.Percent); // sem %: mantém a última
+                r.Charging = res.Charging; r.Online = true; r.Updated = DateTime.Now;
+            }
+            foreach (var r in last.Values) { Result res; if (!outcome.TryGetValue(r.Key, out res) || !res.Online) r.Online = false; }
+            return last.Values.ToList();
+        }
+    }
+
     // ------------------------------------------------------------------ Qualquer marca: campo de bateria padrão HID
     class GenericHidSource : IBatterySource
     {
@@ -1119,7 +2176,7 @@ namespace BatteryTray
 
         public List<Reading> Poll()
         {
-            var all = Hid.Enumerate().Where(i => !HandledVendors.Contains(i.Vid)).ToList();
+            var all = Hid.Enumerate().Where(i => !HandledVendors.Contains(i.Vid) && !VendorSource.Handles(i.Vid, i.Pid)).ToList();
             var seen = new HashSet<string>();
             foreach (var grp in all.GroupBy(i => i.Vid.ToString("X4") + ":" + i.Pid.ToString("X4")))
             {
@@ -2702,7 +3759,7 @@ namespace BatteryTray
     static class Updater
     {
         // Ao publicar uma versão nova, mude este número e crie a tag "v" + número (veja release.ps1).
-        public const string Version = "1.6.1";
+        public const string Version = "1.7.0";
         const string Repo = "HenriqueGomez/BatteryTray";
         const string Agent = "BatteryTray-Updater";
 
@@ -2855,7 +3912,9 @@ namespace BatteryTray
         static string Source(string key)
         {
             string p = key == null ? "" : key.Split(':')[0];
-            switch (p) { case "logi": return "Logitech HID++"; case "razer": return "Razer Synapse"; case "razerhid": return "Razer USB"; case "win": return "Windows/Bluetooth"; case "hid": return "HID genérico"; case "gamesir": return "GameSir"; case "beken": return "Receptor 2.4G"; case "mchose": return "MCHOSE"; case "xinput": return "XInput"; default: return p; }
+            switch (p) { case "logi": return "Logitech HID++"; case "razer": return "Razer Synapse"; case "razerhid": return "Razer USB"; case "win": return "Windows/Bluetooth"; case "hid": return "HID genérico"; case "gamesir": return "GameSir"; case "beken": return "Receptor 2.4G"; case "mchose": return "MCHOSE"; case "xinput": return "XInput"; }
+            var fam = VendorSource.Families.FirstOrDefault(f => f.Id == p);
+            return fam != null ? fam.Label : p;
         }
 
         public static string Describe(Reading r)
@@ -2936,7 +3995,7 @@ namespace BatteryTray
             raw = rawLog;
             var sources = new Dictionary<string, IBatterySource> {
                 { "Logitech HID++", new LogitechSource() }, { "Razer Synapse 4 (logs)", new RazerLogSource() }, { "Razer USB (mouses/teclados)", new RazerHidSource() },
-                { "Windows/Bluetooth", new WindowsBatterySource() }, { "GameSir", new GameSirSource() }, { "Receptor 2.4G (Beken/CompX)", new BekenMouseSource() }, { "MCHOSE", new MchoseHeadsetSource() }, { "HID genérico", new GenericHidSource() }, { "XInput", new XInputSource() } };
+                { "Windows/Bluetooth", new WindowsBatterySource() }, { "GameSir", new GameSirSource() }, { "Receptor 2.4G (Beken/CompX)", new BekenMouseSource() }, { "MCHOSE", new MchoseHeadsetSource() }, { "Outras marcas (HyperX, SteelSeries, Corsair, ASUS, Sony...)", new VendorSource() }, { "HID genérico", new GenericHidSource() }, { "XInput", new XInputSource() } };
             try
             {
                 foreach (var kv in sources)
@@ -3022,7 +4081,7 @@ namespace BatteryTray
             }
             catch (Exception ex) { sb.AppendLine("Logs do Razer Synapse 4: erro " + ex.Message); }
 
-            Section(sb, "7. Detalhes técnicos: respostas de GameSir, MCHOSE e receptores 2.4G");
+            Section(sb, "7. Detalhes técnicos: respostas dos aparelhos (GameSir, MCHOSE, receptores 2.4G e outras marcas)");
             sb.Append(rawLog.Length == 0 ? "(nenhum desses aparelhos)" + Environment.NewLine : rawLog.ToString());
 
             Section(sb, "8. Detalhes técnicos: conversa HID++ com aparelhos Logitech");
@@ -3257,7 +4316,7 @@ namespace BatteryTray
             tray.RightClick = ShowMenu;
             tray.NotificationClick = NotificationClicked;
             tray.DevicesChanged = OnDevicesChanged;
-            sources = new IBatterySource[] { logi, razer, new RazerHidSource(), new WindowsBatterySource(), new GameSirSource(), beken, new MchoseHeadsetSource(), new GenericHidSource(), new XInputSource() };
+            sources = new IBatterySource[] { logi, razer, new RazerHidSource(), new WindowsBatterySource(), new GameSirSource(), beken, new MchoseHeadsetSource(), new VendorSource(), new GenericHidSource(), new XInputSource() };
             logi.Changed += () => ui.Post(_ => OnDevicesChanged(), null);          // receptor avisou: relê tudo (junta avisos seguidos)
             beken.Changed += () => ui.Post(_ => Apply(beken.Snapshot()), null);   // quadro novo do mouse 2.4G: atualiza na hora
             fastTimer = new System.Threading.Timer(_ => FastTick(), null, 3000, 2000);
@@ -3609,7 +4668,7 @@ namespace BatteryTray
             HppChannel.DebugLog = Path.Combine(outDir, "hpp.log");
             File.WriteAllText(HppChannel.DebugLog, "");
             var all = new List<Reading>();
-            foreach (var s in new IBatterySource[] { new LogitechSource(), new RazerLogSource(), new RazerHidSource(), new WindowsBatterySource(), new GameSirSource(), new BekenMouseSource(), new MchoseHeadsetSource(), new GenericHidSource(), new XInputSource() }) all.AddRange(s.Poll());
+            foreach (var s in new IBatterySource[] { new LogitechSource(), new RazerLogSource(), new RazerHidSource(), new WindowsBatterySource(), new GameSirSource(), new BekenMouseSource(), new MchoseHeadsetSource(), new VendorSource(), new GenericHidSource(), new XInputSource() }) all.AddRange(s.Poll());
             File.WriteAllLines(Path.Combine(outDir, "dump.txt"), all.Select(r => string.Format("{0} | {1} | {2}% | online={3} | charging={4} | {5}", r.Key, r.Name, r.Percent, r.Online, r.Charging, r.Updated)));
             all.Add(new Reading { Kind = DeviceKind.Mouse, Percent = 100, Online = true, Charging = true });
             all.Add(new Reading { Kind = DeviceKind.Headset, Percent = 45, Online = true, Charging = true });
