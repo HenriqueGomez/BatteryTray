@@ -32,7 +32,7 @@ O menu abre com o clique direito no painel (ou em qualquer aparelho, no modo de 
 
 - **Dispositivos na barra:** escolha quais aparelhos aparecem. Os interruptores não fecham o menu.
 - **Personalizar...:** abre uma janela com prévia ao vivo. Nela você escolhe o estilo (painel ou um ícone por aparelho na bandeja), liga ou desliga a barra, o `%` e os nomes curtos, troca o tamanho (o **Compacto** mostra só o ícone e a bateria) e, para cada aparelho, a cor, o nome curto e a ordem.
-- **Atualizar agora:** relê as baterias sem fechar o menu. Isso também acontece sozinho a cada minuto, e na hora quando um aparelho é plugado ou desplugado, ou quando um aparelho Logitech, Razer ou de receptor "2.4G 8K" liga, desliga ou muda a bateria.
+- **Atualizar agora:** relê as baterias sem fechar o menu. Isso também acontece sozinho a cada 10 segundos, para todos os aparelhos. Acontece ainda na hora quando um aparelho é plugado ou desplugado, ou quando um aparelho que avisa liga, desliga ou muda a bateria (Logitech, Razer, mouses com receptor "2.4G 8K" e alguns HyperX).
 - **Iniciar com o Windows.**
 - **Avisar bateria baixa:** mostra uma notificação do Windows quando um aparelho chega a 15% e outra em 5%. Depois de carregar, volta a avisar. Respeita o "Não incomodar". Vem ligado.
 - **Verificar atualizações:** mostra a versão instalada e, quando existir uma nova, vira **Atualizar para vX.Y.Z**. O app também procura sozinho, ao abrir e a cada 6 horas, e avisa com uma notificação do Windows. Clicar na notificação já começa a atualização. A atualização baixa o novo `.exe`, confere o SHA-256 publicado no Release, troca o arquivo e reabre o app.
@@ -71,6 +71,7 @@ Fora o HyperX Cloud III Wireless, nenhum deles foi testado com o BatteryTray, en
 - dongles 2.4 GHz com protocolo próprio da marca que não estão nas listas acima;
 - controles cujo receptor se apresenta ao Windows como "com fio" (por exemplo, o dongle da 8BitDo);
 - headsets cujo receptor 2.4 GHz não transmite a bateria, como o **Baseus AeQur GH02** (receptor `10D6:4802`, chip da Actions). Pelo Bluetooth, ele aparece se o Windows mostrar a bateria em *Configurações → Bluetooth e dispositivos*;
+- aparelhos Logitech que não informam a bateria, como o mouse "Wireless Mouse" de alguns kits teclado+mouse (o teclado do kit funciona);
 - aparelhos Logitech que só informam a tensão: nesse caso a porcentagem é uma **estimativa**.
 
 **Testado com:** Logitech G502 X PLUS, Razer Kraken V3 Pro, GameSir Cyclone 2, Delux M900 Pro (receptor 2.4G), MCHOSE V9 Turbo+ e HyperX Cloud III Wireless. Outros aparelhos usam os mesmos protocolos, mas podem se comportar diferente.

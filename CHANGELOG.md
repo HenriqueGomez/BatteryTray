@@ -12,6 +12,13 @@ Como usar (mantenedor):
 
 ## [Não publicado]
 
+## [1.7.1] - 2026-11-19
+
+### Melhorias
+- Todos os aparelhos são relidos a cada 10 segundos, e não mais a cada minuto. Ligar um headset ou um mouse cujo receptor fica sempre plugado já aparece em poucos segundos, sem clicar em **Atualizar agora**.
+- HyperX Cloud III Wireless, Cloud II Core Wireless, Cloud Alpha Wireless, Cloud Alpha 2 Wireless e Pulsefire Haste 2: o app escuta os avisos que o receptor manda quando o aparelho liga, desliga ou muda a bateria, e relê na hora.
+- O diagnóstico lista as funções dos aparelhos Logitech que respondem mas não informam a bateria por nenhum dos caminhos conhecidos, para descobrir como ler esses modelos. O mouse "Wireless Mouse" de alguns kits teclado+mouse, por exemplo, não tem nenhuma função de bateria; o teclado do kit aparece normalmente.
+
 ## [1.7.0] - 2026-11-19
 
 ### Novidades

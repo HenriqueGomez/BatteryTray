@@ -382,7 +382,7 @@ namespace BatteryTray
         public void Dispose() { closed = true; try { fs.Dispose(); } catch { } }
 
         public static string DebugLog; // caminho do log (só no --dump e durante o diagnóstico)
-        static void Log(string s) { if (DebugLog != null) File.AppendAllText(DebugLog, DateTime.Now.ToString("HH:mm:ss.fff ") + s + Environment.NewLine); }
+        internal static void Log(string s) { if (DebugLog != null) File.AppendAllText(DebugLog, DateTime.Now.ToString("HH:mm:ss.fff ") + s + Environment.NewLine); }
         static string Hex(byte[] b) { var sb = new StringBuilder(); foreach (var x in b) sb.AppendFormat("{0:X2} ", x); return sb.ToString(); }
     }
 
@@ -575,6 +575,37 @@ namespace BatteryTray
         //  0x1001 BATTERY_VOLTAGE (mV -> % estimada) · 0x1F20 ADC_MEASUREMENT (headsets G; mV -> % estimada)
         static readonly ushort[] BatteryFeatures = { 0x1004, 0x1000, 0x1001, 0x1F20 };
 
+        // Só no diagnóstico: aparelho que respondeu mas não tem nenhuma feature de bateria conhecida.
+        // Lista as features dele (FEATURE_SET 0x0001) e o nome, para descobrir por onde ele informa a bateria.
+        static void ListFeatures(HppChannel ch, byte dev)
+        {
+            var ids = new List<string>();
+            byte fs = FeatureIndex(ch, dev, 0x0001, 500);
+            var cnt = fs == 0 ? null : ch.Call(dev, fs, 0, 500);
+            if (cnt != null)
+                for (int i = 1; i <= cnt[0] && i < 64; i++)
+                {
+                    var p = ch.Call(dev, fs, 1, 500, (byte)i);
+                    if (p == null) break;
+                    ids.Add((p[0] << 8 | p[1]).ToString("X4"));
+                }
+            string name = null;
+            byte nameIdx = FeatureIndex(ch, dev, 0x0005, 500);
+            var len = nameIdx == 0 ? null : ch.Call(dev, nameIdx, 0, 500);
+            if (len != null)
+            {
+                var sb = new StringBuilder();
+                for (int off = 0; off < len[0]; off += 16)
+                {
+                    var part = ch.Call(dev, nameIdx, 1, 500, (byte)off);
+                    if (part == null) break;
+                    for (int i = 0; i < 16 && sb.Length < len[0]; i++) sb.Append((char)part[i]);
+                }
+                name = sb.ToString().TrimEnd('\0').Trim();
+            }
+            HppChannel.Log("   aparelho " + dev + " sem feature de bateria conhecida: \"" + (name ?? "?") + "\", features " + (ids.Count > 0 ? string.Join(" ", ids) : "?"));
+        }
+
         static Known Discover(HppChannel ch, string path, byte dev)
         {
             byte idx = 0; ushort feat = 0;
@@ -584,7 +615,7 @@ namespace BatteryTray
                 if (r < 0 && i == 0) return null; // nada responde neste índice: não há aparelho
                 if (r > 0) { idx = (byte)r; feat = BatteryFeatures[i]; }
             }
-            if (idx == 0) return null;
+            if (idx == 0) { if (HppChannel.DebugLog != null) ListFeatures(ch, dev); return null; }
             var k = new Known { Path = path, Dev = dev, BattIdx = idx, BattFeature = feat, Name = "Logitech", Kind = DeviceKind.Other };
             byte nameIdx = FeatureIndex(ch, dev, 0x0005, 500);
             if (nameIdx != 0)
@@ -1004,7 +1035,7 @@ namespace BatteryTray
         const int OfflineSeconds = 8; // sem quadros por esse tempo: mouse dormindo ou desligado
 
         // O app escuta o receptor o tempo todo: cada quadro atualiza a leitura na hora (evento Changed),
-        // em vez de só na leitura de cada minuto.
+        // em vez de só na leitura de cada 10 s.
         readonly object sync = new object();
         readonly Dictionary<string, Reading> last = new Dictionary<string, Reading>();         // por chave
         readonly Dictionary<string, DateTime> lastFrame = new Dictionary<string, DateTime>();  // por chave
@@ -1397,6 +1428,7 @@ namespace BatteryTray
                 Models = M(0x0F98, "HyperX Pulsefire Haste 2 Wireless", 0x0D97, "HyperX Pulsefire Haste 2 Wireless", 0x0AB5, "HyperX Pulsefire Haste 2 Core Wireless",
                            0x0DA0, "HyperX Pulsefire Haste 2 Mini"),
                 Collection = i => VendorSource.Mi(i) == 2 && i.UsagePage == 0xFF00 && i.Usage == 0x0001 && i.OutLen >= 64,
+                Push = x => x[0] == 0xFB, // avisos do receptor
                 Read = c =>
                 {
                     var on = c.Ask(B(0x52, 0x01), Starts(0x53, 0x01), 1000);
@@ -1457,6 +1489,8 @@ namespace BatteryTray
                 Models = M(0x05B7, "HyperX Cloud III Wireless", 0x0C9D, "HyperX Cloud III Wireless", 0x0FCC, "HyperX Cloud III Wireless",
                            0x069F, "HyperX Cloud II Core Wireless", 0x0995, "HyperX Cloud II Core Wireless"),
                 Collection = i => i.OutLen >= 62 && i.InLen >= 62 && (i.UsagePage >= 0xFF00 || (i.OutLen == 62 && i.InLen == 62)),
+                // avisos espontâneos: 66 0B headset ligou/desligou, 66 0C carregando, 66 0D bateria (fonte: HyperBatteryMonitor)
+                Push = x => x.Length > 1 && x[0] == 0x66 && (x[1] == 0x0B || x[1] == 0x0C || x[1] == 0x0D),
                 Read = c =>
                 {
                     // 82 diz se o headset está ligado ao receptor; como nem todo projeto usa esse pedido, a bateria (89) é
@@ -1511,6 +1545,7 @@ namespace BatteryTray
                 Id = "hyperx", Label = "HyperX", Kind = DeviceKind.Headset, Vid = 0x03F0,
                 Models = M(0x098D, "HyperX Cloud Alpha Wireless"),
                 Collection = i => i.UsagePage >= 0xFF00 && i.OutLen >= 3,
+                Push = x => x.Length > 2 && x[0] == 0x21 && x[1] == 0xBB && (x[2] == 0x25 || x[2] == 0x26), // avisos de bateria e de carga
                 Read = c =>
                 {
                     var st = c.Ask(B(0x21, 0xBB, 0x03), Starts(0x21, -1, 0x03), 1500);
@@ -1528,6 +1563,7 @@ namespace BatteryTray
                 Id = "hyperx", Label = "HyperX", Kind = DeviceKind.Headset, Vid = 0x03F0,
                 Models = M(0x08BE, "HyperX Cloud Alpha 2 Wireless"),
                 Collection = i => i.UsagePage == 0xFF13 && i.Usage == 0xFF00 && VendorSource.Mi(i) == 2,
+                Push = x => x[0] == 0xFB, // avisos da base (FB 0A: headset ligou/desligou)
                 Read = c =>
                 {
                     var on = c.Ask(B(0x52, 0x01), Starts(0x53, 0x01), 1000);
@@ -1972,8 +2008,30 @@ namespace BatteryTray
     // Cada família diz para quais aparelhos (VID:PID exatos) e para qual coleção HID manda o pedido, e como ler a resposta
     // (veja VendorFamilies). Só pedidos de leitura, e nunca para um aparelho que não está na lista.
     // Índices sempre no buffer do Windows: [0] é o número do relatório (0x00 quando o aparelho não numera os relatórios).
-    class VendorSource : IBatterySource
+    class VendorSource : IBatterySource, IDisposable
     {
+        // Famílias com "Push": o app escuta a coleção o tempo todo, e um aviso do aparelho dispara Changed.
+        // As respostas aos pedidos do app não contam: Push só aceita os avisos espontâneos.
+        public event Action Changed;
+        readonly Dictionary<string, HidListener> listeners = new Dictionary<string, HidListener>();
+
+        void Listen(Dictionary<string, Tuple<Hid.Info, Func<byte[], bool>>> wanted)
+        {
+            lock (listeners)
+            {
+                foreach (var p in listeners.Keys.ToList())
+                    if (!listeners[p].Alive || !wanted.ContainsKey(p)) { listeners[p].Dispose(); listeners.Remove(p); }
+                foreach (var kv in wanted)
+                {
+                    if (listeners.ContainsKey(kv.Key)) continue;
+                    var push = kv.Value.Item2;
+                    try { listeners[kv.Key] = new HidListener(kv.Value.Item1, f => { if (push(f) && Changed != null) Changed(); }); } catch { }
+                }
+            }
+        }
+
+        public void Dispose() { lock (listeners) { foreach (var l in listeners.Values) l.Dispose(); listeners.Clear(); } }
+
         public class Result
         {
             public int Percent = -1;   // -1: o aparelho não informou (ex.: alguns headsets enquanto carregam)
@@ -1989,6 +2047,7 @@ namespace BatteryTray
             public Dictionary<ushort, string> Models;    // PID -> nome do aparelho
             public Dictionary<ushort, DeviceKind> Kinds; // aparelhos de outro tipo que o da família (opcional)
             public bool AnyPid;                          // qualquer PID do fabricante que tenha a coleção (nome do próprio aparelho)
+            public Func<byte[], bool> Push;              // avisos que o aparelho manda sozinho (ligou, desligou, bateria): relê na hora
             public Func<Hid.Info, bool> Collection;      // a coleção que recebe o pedido
             public Func<Ctx, Result> Read;               // null: o aparelho não respondeu
         }
@@ -2125,6 +2184,7 @@ namespace BatteryTray
             var all = Hid.Enumerate();
             var outcome = new Dictionary<string, Result>();
             var meta = new Dictionary<string, Tuple<string, DeviceKind>>();
+            var wanted = new Dictionary<string, Tuple<Hid.Info, Func<byte[], bool>>>();
             foreach (var fam in Families)
                 foreach (var grp in all.Where(i => i.Vid == fam.Vid && (fam.AnyPid ? i.Pid != 0 : fam.Models.ContainsKey(i.Pid))).GroupBy(i => i.Pid))
                 {
@@ -2142,6 +2202,7 @@ namespace BatteryTray
                     meta[key] = Tuple.Create(name, kind);
                     foreach (var col in device.Where(fam.Collection))
                     {
+                        if (fam.Push != null) wanted[col.Path] = Tuple.Create(col, fam.Push);
                         var ctx = new Ctx { Info = col, Device = device, Label = fam.Label + " " + fam.Vid.ToString("X4") + ":" + grp.Key.ToString("X4") };
                         Result res = null;
                         try { res = fam.Read(ctx); }
@@ -2163,6 +2224,7 @@ namespace BatteryTray
                 r.Charging = res.Charging; r.Online = true; r.Updated = DateTime.Now;
             }
             foreach (var r in last.Values) { Result res; if (!outcome.TryGetValue(r.Key, out res) || !res.Online) r.Online = false; }
+            Listen(wanted);
             return last.Values.ToList();
         }
     }
@@ -3759,7 +3821,7 @@ namespace BatteryTray
     static class Updater
     {
         // Ao publicar uma versão nova, mude este número e crie a tag "v" + número (veja release.ps1).
-        public const string Version = "1.7.0";
+        public const string Version = "1.7.1";
         const string Repo = "HenriqueGomez/BatteryTray";
         const string Agent = "BatteryTray-Updater";
 
@@ -4122,7 +4184,25 @@ namespace BatteryTray
         readonly LogitechSource logi = new LogitechSource();
         readonly RazerLogSource razer = new RazerLogSource();
         readonly BekenMouseSource beken = new BekenMouseSource();
+        readonly VendorSource vendor = new VendorSource();
         readonly IBatterySource[] sources;
+
+        // Outras marcas que avisam (ex.: HyperX): relê essa fonte 1 s e 5 s depois do aviso, sem esperar a leitura de 10 s
+        // (logo que liga, o headset às vezes ainda não responde a bateria).
+        System.Threading.Timer vendorSoon;
+        int vendorBusy, vendorSoonLeft;
+        void VendorTick()
+        {
+            if (Interlocked.Exchange(ref vendorBusy, 1) == 1) return;
+            try { List<Reading> r; lock (vendor) r = vendor.Poll(); ui.Post(_ => Apply(r), null); }
+            catch { }
+            finally { Interlocked.Exchange(ref vendorBusy, 0); }
+        }
+        void VendorPushed()
+        {
+            Interlocked.Exchange(ref vendorSoonLeft, 2);
+            vendorSoon.Change(1000, 4000);
+        }
         System.Threading.Timer fastTimer;
         int fastBusy;
         string razerSig;
@@ -4316,8 +4396,10 @@ namespace BatteryTray
             tray.RightClick = ShowMenu;
             tray.NotificationClick = NotificationClicked;
             tray.DevicesChanged = OnDevicesChanged;
-            sources = new IBatterySource[] { logi, razer, new RazerHidSource(), new WindowsBatterySource(), new GameSirSource(), beken, new MchoseHeadsetSource(), new VendorSource(), new GenericHidSource(), new XInputSource() };
+            sources = new IBatterySource[] { logi, razer, new RazerHidSource(), new WindowsBatterySource(), new GameSirSource(), beken, new MchoseHeadsetSource(), vendor, new GenericHidSource(), new XInputSource() };
             logi.Changed += () => ui.Post(_ => OnDevicesChanged(), null);          // receptor avisou: relê tudo (junta avisos seguidos)
+            vendorSoon = new System.Threading.Timer(_ => { VendorTick(); if (Interlocked.Decrement(ref vendorSoonLeft) <= 0) vendorSoon.Change(Timeout.Infinite, Timeout.Infinite); }, null, Timeout.Infinite, Timeout.Infinite);
+            vendor.Changed += VendorPushed;                                         // aviso do aparelho: relê essa fonte na hora
             beken.Changed += () => ui.Post(_ => Apply(beken.Snapshot()), null);   // quadro novo do mouse 2.4G: atualiza na hora
             fastTimer = new System.Threading.Timer(_ => FastTick(), null, 3000, 2000);
             tray.Recreated = () => { iconSig.Clear(); Layout(); };
@@ -4331,7 +4413,8 @@ namespace BatteryTray
             SystemEvents.UserPreferenceChanged += (s, e) => { foreach (var o in overlays.Values) o.Invalidate(); panel.Invalidate(); Layout(); };
             panel.LeftClick = RefreshNow;
             panel.RightClick = ShowMenu;
-            poll = new System.Threading.Timer(_ => Tick(), null, 0, 60000);
+            // relê todas as fontes a cada 10 s: nem todo aparelho avisa quando liga ou desliga (o receptor continua plugado)
+            poll = new System.Threading.Timer(_ => Tick(), null, 0, 10000);
             // verifica atualizações 20 s depois de abrir e a cada 6 horas
             updateTimer = new System.Threading.Timer(_ => ui.Post(__ => CheckUpdates(false), null), null, 5000, 6 * 3600 * 1000);
         }
@@ -4610,7 +4693,8 @@ namespace BatteryTray
             poll.Dispose(); layoutTimer.Stop(); watchTimer.Stop();
             if (deviceTimer != null) { deviceTimer.Stop(); deviceLaterTimer.Stop(); }
             if (fastTimer != null) fastTimer.Dispose();
-            logi.Dispose(); beken.Dispose(); if (updateTimer != null) updateTimer.Dispose();
+            vendorSoon.Dispose();
+            logi.Dispose(); beken.Dispose(); vendor.Dispose(); if (updateTimer != null) updateTimer.Dispose();
             foreach (var o in overlays.Values) o.Dispose();
             panel.Dispose();
             if (appearanceForm != null && !appearanceForm.IsDisposed) appearanceForm.Dispose();
