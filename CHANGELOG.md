@@ -12,6 +12,17 @@ Como usar (mantenedor):
 
 ## [Não publicado]
 
+## [1.8.0] - 2026-11-20
+
+### Novidades
+- **Janela Personalizar nova**, no visual das Configurações do Windows 11, com interruptores e botões de escolha.
+  - Na prévia, no alto da janela, cada aparelho é um cartão. Para mudar a ordem, arraste um cartão para os lados: ele segue o mouse e os outros abrem espaço.
+  - As mudanças só valem quando você clica em **Aplicar**. **Cancelar**, ou fechar a janela, descarta.
+- **Ocultar aparelhos desligados**, em **Personalizar...**, vem ligado: um aparelho desligado sai da barra e volta quando liga. Ele continua no menu, com o último valor. Para ele ficar na barra, em cinza, como antes, desligue essa opção.
+
+### Correções
+- As preferências de **Personalizar...** são gravadas de um jeito mais seguro. Antes, o app apagava todas e gravava de novo a cada mudança; se ele fosse fechado bem nessa hora, elas se perdiam. Cada preferência também é lida separadamente, então um valor com problema não faz as outras voltarem ao padrão.
+
 ## [1.7.1] - 2026-11-19
 
 ### Melhorias

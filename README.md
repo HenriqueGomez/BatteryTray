@@ -6,7 +6,7 @@ Mostra a bateria dos seus dispositivos sem fio (mouse, headset, teclado, control
 
 - **Normal:** o ícone na cor do aparelho, a porcentagem e a barra.
 - **Carregando:** o `%` vira um raio, por exemplo `45⚡`.
-- **Desligado ou fora de alcance:** fica cinza e mostra o último valor conhecido. Passando o mouse, aparece quando ele foi lido, por exemplo "lido ontem às 22:00".
+- **Desligado ou fora de alcance:** some da barra até ligar de novo, e continua no menu com o último valor e quando foi lido, por exemplo "lido ontem às 22:00". Se preferir que ele fique na barra, em cinza, desligue **Ocultar aparelhos desligados** em **Personalizar...**.
 - **Bateria baixa (15% ou menos):** fica vermelho e, se o aviso estiver ligado, chega uma notificação.
 - **Detalhes:** passando o mouse, aparece o nome do aparelho e a porcentagem. Clique para reler as baterias; clique com o botão direito para abrir o menu.
 
@@ -31,7 +31,7 @@ Cores, nomes curtos (como o `600` acima), ordem, tamanho, barra e `%` podem ser 
 O menu abre com o clique direito no painel (ou em qualquer aparelho, no modo de ícones), ou no ícone de bateria do BatteryTray, dentro da setinha `^`:
 
 - **Dispositivos na barra:** escolha quais aparelhos aparecem. Os interruptores não fecham o menu.
-- **Personalizar...:** abre uma janela com prévia ao vivo. Nela você escolhe o estilo (painel ou um ícone por aparelho na bandeja), liga ou desliga a barra, o `%` e os nomes curtos, troca o tamanho (o **Compacto** mostra só o ícone e a bateria) e, para cada aparelho, a cor, o nome curto e a ordem.
+- **Personalizar...:** abre uma janela com prévia. Nela você escolhe o estilo (painel ou um ícone por aparelho na bandeja), se os aparelhos desligados ficam escondidos (vem ligado), liga ou desliga a barra, o `%` e os nomes curtos, troca o tamanho (o **Compacto** mostra só o ícone e a bateria) e, para cada aparelho, a cor e o nome curto. Para mudar a ordem, arraste os aparelhos na prévia. Nada muda na barra até você clicar em **Aplicar**; **Cancelar** descarta as mudanças.
 - **Atualizar agora:** relê as baterias sem fechar o menu. Isso também acontece sozinho a cada 10 segundos, para todos os aparelhos. Acontece ainda na hora quando um aparelho é plugado ou desplugado, ou quando um aparelho que avisa liga, desliga ou muda a bateria (Logitech, Razer, mouses com receptor "2.4G 8K" e alguns HyperX).
 - **Iniciar com o Windows.**
 - **Avisar bateria baixa:** mostra uma notificação do Windows quando um aparelho chega a 15% e outra em 5%. Depois de carregar, volta a avisar. Respeita o "Não incomodar". Vem ligado.
