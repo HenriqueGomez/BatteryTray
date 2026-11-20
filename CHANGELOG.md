@@ -12,6 +12,14 @@ Como usar (mantenedor):
 
 ## [Não publicado]
 
+## [1.6.1] - 2026-11-19
+
+### Correções
+- Alguns aparelhos Logitech, como o teclado de kits teclado+mouse ("Wireless Keyboard"), apareciam com espaços sobrando no fim do nome, no menu e na dica.
+
+### Documentação
+- O README lista o headset Baseus AeQur GH02 entre os que não funcionam pelo receptor 2.4 GHz, que não transmite a bateria.
+
 ## [1.6.0] - 2026-11-19
 
 ### Melhorias

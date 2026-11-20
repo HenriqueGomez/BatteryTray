@@ -581,7 +581,8 @@ namespace BatteryTray
                         if (part == null) break;
                         for (int i = 0; i < 16 && sb.Length < c[0]; i++) sb.Append((char)part[i]);
                     }
-                    if (sb.Length > 0) k.Name = sb.ToString().TrimEnd('\0');
+                    var name = sb.ToString().TrimEnd('\0').Trim(); // alguns teclados completam o nome com espaços
+                    if (name.Length > 0) k.Name = name;
                 }
                 var t = ch.Call(dev, nameIdx, 2, 500);
                 if (t != null)
@@ -2701,7 +2702,7 @@ namespace BatteryTray
     static class Updater
     {
         // Ao publicar uma versão nova, mude este número e crie a tag "v" + número (veja release.ps1).
-        public const string Version = "1.6.0";
+        public const string Version = "1.6.1";
         const string Repo = "HenriqueGomez/BatteryTray";
         const string Agent = "BatteryTray-Updater";
 

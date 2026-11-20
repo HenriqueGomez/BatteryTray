@@ -55,6 +55,7 @@ O menu abre com o clique direito no painel (ou em qualquer aparelho, no modo de 
 **Não funciona com:**
 - dongles 2.4 GHz que usam protocolo próprio da marca;
 - controles cujo receptor se apresenta ao Windows como "com fio" (por exemplo, o dongle da 8BitDo);
+- headsets cujo receptor 2.4 GHz não transmite a bateria, como o **Baseus AeQur GH02** (receptor `10D6:4802`, chip da Actions). Pelo Bluetooth, ele aparece se o Windows mostrar a bateria em *Configurações → Bluetooth e dispositivos*;
 - aparelhos Logitech que só informam a tensão: nesse caso a porcentagem é uma **estimativa**.
 
 **Testado com:** Logitech G502 X PLUS, Razer Kraken V3 Pro, GameSir Cyclone 2, Delux M900 Pro (receptor 2.4G) e MCHOSE V9 Turbo+. Outros aparelhos usam os mesmos protocolos, mas podem se comportar diferente.
