@@ -226,20 +226,21 @@ namespace BatteryTray
             return "outro";
         }
 
-        // A lista é montada uma vez a cada poucos segundos e compartilhada pelas fontes de uma mesma rodada:
-        // montar abre todos os aparelhos HID do PC, e um aparelho lento atrasaria cada fonte.
+        // A lista é montada só quando um aparelho é plugado ou desplugado (InvalidateCache) e, por segurança, a cada 10 min.
+        // Montar abre todos os aparelhos HID do PC e pede o nome de cada um pelo USB: refeita a cada leitura, isso
+        // atrapalhava os receptores (mouse 8K etc.) e causava travadinhas.
         static readonly object enumLock = new object();
         static List<Info> enumCache;
         static DateTime enumAt;
 
         // aparelho ligado/desligado: a próxima leitura monta a lista de novo
-        public static void InvalidateCache() { lock (enumLock) enumCache = null; }
+        public static void InvalidateCache() { lock (enumLock) enumCache = null; WindowsBatterySource.RequestFullScan(); }
 
         public static List<Info> Enumerate()
         {
             lock (enumLock)
             {
-                if (enumCache == null || (DateTime.UtcNow - enumAt).TotalSeconds > 5)
+                if (enumCache == null || (DateTime.UtcNow - enumAt).TotalMinutes > 10)
                 {
                     enumCache = EnumerateNow();
                     enumAt = DateTime.UtcNow;
@@ -1035,7 +1036,7 @@ namespace BatteryTray
         const int OfflineSeconds = 8; // sem quadros por esse tempo: mouse dormindo ou desligado
 
         // O app escuta o receptor o tempo todo: cada quadro atualiza a leitura na hora (evento Changed),
-        // em vez de só na leitura de cada 10 s.
+        // em vez de só na leitura de cada 60 s.
         readonly object sync = new object();
         readonly Dictionary<string, Reading> last = new Dictionary<string, Reading>();         // por chave
         readonly Dictionary<string, DateTime> lastFrame = new Dictionary<string, DateTime>();  // por chave
@@ -2293,23 +2294,51 @@ namespace BatteryTray
 
         static string Str(byte[] b) { return b == null ? null : Encoding.Unicode.GetString(b).TrimEnd('\0'); }
 
+        // Percorrer todos os dispositivos do Windows é uma consulta pesada. Ela é feita ao abrir e quando um aparelho é
+        // plugado ou desplugado; nas outras leituras, só os enumeradores Bluetooth e os que já tinham bateria.
+        // O pedido de varredura completa é um contador, e cada instância guarda o último que atendeu: o diagnóstico (que cria
+        // a própria instância) não "gasta" o pedido da instância do app. Por segurança, também há uma completa a cada 10 min,
+        // para achar aparelhos que passam a informar bateria sem serem plugados (ex.: headset que liga com o receptor já no PC).
+        static readonly string[] BluetoothEnumerators = { "BTHENUM", "BTHLE", "BTHLEDEVICE" };
+        static int fullScanRequest;
+        int fullScanDone = -1;
+        DateTime lastFull;
+        readonly HashSet<string> batteryEnumerators = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        public static void RequestFullScan() { Interlocked.Increment(ref fullScanRequest); }
+
         public List<Reading> Poll()
         {
             var seen = new HashSet<string>();
-            IntPtr set = SetupDiGetClassDevs(IntPtr.Zero, null, IntPtr.Zero, 0x2 | 0x4); // PRESENT | ALLCLASSES
-            try
+            int request = Volatile.Read(ref fullScanRequest);
+            bool full = request != fullScanDone || (DateTime.UtcNow - lastFull).TotalMinutes >= 10;
+            if (full) { fullScanDone = request; lastFull = DateTime.UtcNow; batteryEnumerators.Clear(); }
+            var enumerators = full ? new string[] { null } : BluetoothEnumerators.Union(batteryEnumerators, StringComparer.OrdinalIgnoreCase).ToArray();
+            foreach (var en in enumerators)
             {
+                IntPtr set = SetupDiGetClassDevs(IntPtr.Zero, en, IntPtr.Zero, 0x2 | 0x4); // PRESENT | ALLCLASSES (só desse enumerador)
+                if (set == IntPtr.Zero || set == new IntPtr(-1)) continue;
+                try { ScanSet(set, seen, full); }
+                finally { SetupDiDestroyDeviceInfoList(set); }
+            }
+            foreach (var r in last.Values) if (!seen.Contains(r.Key)) r.Online = false;
+            return last.Values.ToList();
+        }
+
+        void ScanSet(IntPtr set, HashSet<string> seen, bool full)
+        {
                 var d = new SP_DEVINFO_DATA(); d.cbSize = Marshal.SizeOf(d);
                 for (int i = 0; SetupDiEnumDeviceInfo(set, i, ref d); i++)
                 {
                     int t;
                     var b = Prop(set, ref d, KeyBattery, out t);
                     if (b == null || b.Length < 1 || b[0] > 100) continue;
+                    if (full) { string e = Str(Prop(set, ref d, KeyEnumerator, out t)); if (!string.IsNullOrEmpty(e)) batteryEnumerators.Add(e); }
                     var cont = Prop(set, ref d, KeyContainer, out t);
-                    string key = "win:" + (cont != null && cont.Length == 16 ? new Guid(cont).ToString() : i.ToString());
+                    string name = Str(Prop(set, ref d, KeyFriendly, out t)) ?? Str(Prop(set, ref d, KeyDesc, out t)) ?? "Bluetooth";
+                    // sem "container": a chave usa o nome, que não muda entre a leitura completa e a parcial (a posição muda)
+                    string key = "win:" + (cont != null && cont.Length == 16 ? new Guid(cont).ToString() : "nome:" + name);
                     if (seen.Contains(key)) continue;
                     seen.Add(key);
-                    string name = Str(Prop(set, ref d, KeyFriendly, out t)) ?? Str(Prop(set, ref d, KeyDesc, out t)) ?? "Bluetooth";
                     var cod = Prop(set, ref d, KeyCod, out t);
                     var kind = DeviceClassifier.Best(cod != null && cod.Length >= 4 ? DeviceClassifier.FromCod(BitConverter.ToUInt32(cod, 0)) : DeviceKind.Other,
                                                      DeviceClassifier.FromName(name));
@@ -2318,10 +2347,6 @@ namespace BatteryTray
                     r.Name = name; r.Kind = kind; r.Percent = b[0]; r.Updated = DateTime.Now;
                     r.Online = true; // o Windows mantém o último valor conhecido do aparelho pareado
                 }
-            }
-            finally { SetupDiDestroyDeviceInfoList(set); }
-            foreach (var r in last.Values) if (!seen.Contains(r.Key)) r.Online = false;
-            return last.Values.ToList();
         }
 
         static readonly DEVPROPKEY KeyEnumerator = new DEVPROPKEY("a45c254e-df1c-4efd-8020-67d146a850e0", 24);
@@ -4471,6 +4496,7 @@ namespace BatteryTray
 
             // leitura nova de cada fonte, com a conversa HID++ gravada num arquivo temporário
             Section(sb, "2. Leitura nova, fonte por fonte");
+            Hid.InvalidateCache(); // o diagnóstico monta a lista de aparelhos na hora, sem usar a guardada
             string hppLog = Path.Combine(Path.GetTempPath(), "BatteryTray-hpp-" + Guid.NewGuid().ToString("N") + ".log");
             string prevLog = HppChannel.DebugLog;
             HppChannel.DebugLog = hppLog;
@@ -4608,7 +4634,7 @@ namespace BatteryTray
         readonly VendorSource vendor = new VendorSource();
         readonly IBatterySource[] sources;
 
-        // Outras marcas que avisam (ex.: HyperX): relê essa fonte 1 s e 5 s depois do aviso, sem esperar a leitura de 10 s
+        // Outras marcas que avisam (ex.: HyperX): relê essa fonte 1 s e 5 s depois do aviso, sem esperar a leitura de 60 s
         // (logo que liga, o headset às vezes ainda não responde a bateria).
         System.Threading.Timer vendorSoon;
         int vendorBusy, vendorSoonLeft;
@@ -4818,7 +4844,7 @@ namespace BatteryTray
             tray.NotificationClick = NotificationClicked;
             tray.DevicesChanged = OnDevicesChanged;
             sources = new IBatterySource[] { logi, razer, new RazerHidSource(), new WindowsBatterySource(), new GameSirSource(), beken, new MchoseHeadsetSource(), vendor, new GenericHidSource(), new XInputSource() };
-            logi.Changed += () => ui.Post(_ => OnDevicesChanged(), null);          // receptor avisou: relê tudo (junta avisos seguidos)
+            logi.Changed += () => ui.Post(_ => OnReceiverNotice(), null);          // receptor avisou: relê as baterias (junta avisos seguidos)
             vendorSoon = new System.Threading.Timer(_ => { VendorTick(); if (Interlocked.Decrement(ref vendorSoonLeft) <= 0) vendorSoon.Change(Timeout.Infinite, Timeout.Infinite); }, null, Timeout.Infinite, Timeout.Infinite);
             vendor.Changed += VendorPushed;                                         // aviso do aparelho: relê essa fonte na hora
             beken.Changed += () => ui.Post(_ => Apply(beken.Snapshot()), null);   // quadro novo do mouse 2.4G: atualiza na hora
@@ -4834,33 +4860,42 @@ namespace BatteryTray
             SystemEvents.UserPreferenceChanged += (s, e) => { foreach (var o in overlays.Values) o.Invalidate(); panel.Invalidate(); Layout(); };
             panel.LeftClick = RefreshNow;
             panel.RightClick = ShowMenu;
-            // relê todas as fontes a cada 10 s: nem todo aparelho avisa quando liga ou desliga (o receptor continua plugado)
-            poll = new System.Threading.Timer(_ => Tick(), null, 0, 10000);
+            // relê todas as fontes a cada 60 s: nem todo aparelho avisa quando liga ou desliga (o receptor continua plugado).
+            // Não diminuir: cada rodada conversa com os receptores pelo USB e, a cada 10 s, causava travadinhas no PC.
+            // Plugar/desplugar e os aparelhos que avisam (Logitech, Razer, HyperX, 2.4G) continuam atualizando na hora.
+            poll = new System.Threading.Timer(_ => Tick(), null, 0, 60000);
             // verifica atualizações 20 s depois de abrir e a cada 6 horas
             updateTimer = new System.Threading.Timer(_ => ui.Post(__ => CheckUpdates(false), null), null, 5000, 6 * 3600 * 1000);
         }
 
-        public void RefreshNow() { ThreadPool.QueueUserWorkItem(_ => Tick()); }
+        // pedido do usuário (clique no painel, "Atualizar agora"): monta a lista de aparelhos na hora, como ao plugar
+        public void RefreshNow() { Hid.InvalidateCache(); ThreadPool.QueueUserWorkItem(_ => Tick()); }
 
         // Aparelho ligado ou desligado (ex.: o cabo de carregar): relê logo depois e de novo alguns segundos mais tarde,
         // porque um mouse que acabou de entrar no cabo ainda está se apresentando ao Windows.
         // Os avisos vêm em rajadas; o temporizador junta os de um mesmo momento numa leitura só.
+        // Só plugar/desplugar refaz a lista de aparelhos USB e a busca completa do Windows (consultas pesadas). O aviso de um
+        // receptor Logitech (aparelho ligou, desligou ou mudou a bateria) só relê as baterias.
         System.Windows.Forms.Timer deviceTimer, deviceLaterTimer;
-        void OnDevicesChanged()
+        bool plugPending; // tudo na thread da interface (temporizadores do Windows Forms)
+        void OnDevicesChanged() { plugPending = true; ScheduleRefresh(); }
+        void OnReceiverNotice() { ScheduleRefresh(); }
+
+        void ScheduleRefresh()
         {
             if (deviceTimer == null)
             {
                 deviceTimer = new System.Windows.Forms.Timer { Interval = 1500 };
-                deviceTimer.Tick += (s, e) => { deviceTimer.Stop(); RefreshAfterChange(); deviceLaterTimer.Stop(); deviceLaterTimer.Start(); };
+                deviceTimer.Tick += (s, e) => { deviceTimer.Stop(); RefreshAfterChange(plugPending); deviceLaterTimer.Stop(); deviceLaterTimer.Start(); };
                 deviceLaterTimer = new System.Windows.Forms.Timer { Interval = 6000 };
-                deviceLaterTimer.Tick += (s, e) => { deviceLaterTimer.Stop(); RefreshAfterChange(); };
+                deviceLaterTimer.Tick += (s, e) => { deviceLaterTimer.Stop(); RefreshAfterChange(plugPending); plugPending = false; };
             }
             deviceTimer.Stop(); deviceTimer.Start();
         }
 
-        void RefreshAfterChange()
+        void RefreshAfterChange(bool plugged)
         {
-            Hid.InvalidateCache();
+            if (plugged) Hid.InvalidateCache();
             ThreadPool.QueueUserWorkItem(_ =>
             {
                 while (Volatile.Read(ref busy) != 0) Thread.Sleep(100); // espera a leitura em andamento terminar
@@ -4874,6 +4909,7 @@ namespace BatteryTray
         {
             if (refreshStatus != null) return;
             refreshStatus = "Atualizando...";
+            Hid.InvalidateCache();
             if (menu != null && menu.Visible) menu.Invalidate(true);
             ThreadPool.QueueUserWorkItem(_ =>
             {

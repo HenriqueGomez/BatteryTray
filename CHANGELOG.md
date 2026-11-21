@@ -12,6 +12,12 @@ Como usar (mantenedor):
 
 ## [Não publicado]
 
+### Correções
+- O app causava pequenas travadinhas no PC (*microstutter*), mesmo sem nada pesado aberto. A cada 10 segundos ele abria todos os aparelhos USB do PC, pedia o nome de cada um e percorria todos os dispositivos do Windows. Agora:
+  - a leitura de todos os aparelhos volta a ser a cada minuto. Plugar ou desplugar um aparelho e os aparelhos que avisam sozinhos (Logitech, Razer, mouses 2.4G 8K e alguns HyperX) continuam atualizando na hora;
+  - a lista de aparelhos USB só é montada de novo quando algo é plugado ou desplugado, quando você pede para atualizar (clique no painel ou **Atualizar agora**) e, por segurança, a cada 10 minutos. O aviso dos receptores Logitech (aparelho ligou, desligou ou mudou a bateria) só relê as baterias;
+  - a bateria que o Windows conhece é lida só nos aparelhos Bluetooth e nos que já informavam bateria. A busca em todos os dispositivos acontece ao abrir o app, quando algo é plugado ou desplugado, quando você pede para atualizar e a cada 10 minutos.
+
 ## [1.8.0] - 2026-11-20
 
 ### Novidades
