@@ -12,6 +12,8 @@ Como usar (mantenedor):
 
 ## [Não publicado]
 
+## [1.8.1] - 2026-11-21
+
 ### Correções
 - O app causava pequenas travadinhas no PC (*microstutter*), mesmo sem nada pesado aberto. A cada 10 segundos ele abria todos os aparelhos USB do PC, pedia o nome de cada um e percorria todos os dispositivos do Windows. Agora:
   - a leitura de todos os aparelhos volta a ser a cada minuto. Plugar ou desplugar um aparelho e os aparelhos que avisam sozinhos (Logitech, Razer, mouses 2.4G 8K e alguns HyperX) continuam atualizando na hora;
